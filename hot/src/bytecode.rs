@@ -60,7 +60,7 @@ pub const OP_CALLM: u8 = 24;
 pub const OP_RET: u8 = 25;
 /// Print one slot value to the bounded output buffer.
 pub const OP_PRINT: u8 = 26;
-/// No operation placeholder used by passes.
+/// No operation slot reserved for pass rewrites.
 pub const OP_NOP: u8 = 27;
 
 /// Word field masks for the four-byte operand layout.

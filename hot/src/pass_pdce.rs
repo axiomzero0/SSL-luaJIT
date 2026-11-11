@@ -54,7 +54,7 @@ pub fn recompute_refcounts(trace: &mut IrTrace) {
     }
 }
 
-/// Turns one node into a placeholder and releases its operand references.
+/// Turns one node into a no-op record and releases its operand references.
 fn eliminate(trace: &mut IrTrace, idx: usize) {
     for operand in [trace.in0[idx], trace.in1[idx], trace.in2[idx]] {
         if operand != NO_OPERAND {

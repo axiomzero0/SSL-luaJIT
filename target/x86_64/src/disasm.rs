@@ -1,13 +1,19 @@
 // CEP:FILE: target/x86_64/src/disasm.rs
-// CEP:WHAT: Deterministic byte-level disassembler for the emitted instruction subset used by golden codegen evidence.
-// CEP:WHY: Chapter 38.35 requires disassembly evidence; a strict parser over exactly the encodings the emitter produces turns any byte drift into a test failure.
+// CEP:WHAT: Deterministic byte-level decoder for the emitted instruction subset; resolves instruction boundaries and delegates rendering to the text layer.
+// CEP:WHY: Chapter 38.35 requires disassembly evidence; a strict parser over exactly the encodings the emitter produces turns any byte drift into a test failure, and correct per-instruction byte advancement makes instruction boundaries addressable.
 // CEP:CLASS: HPC-0
 // CEP:STATUS: complete
 // CEP:FAILURE: Returns None at the first unknown byte sequence; goldens fail loudly on drift.
-// CEP:ASSUMES: input was produced by this repository's encoder; foreign encodings are rejected rather than guessed.
+// CEP:ASSUMES: input was produced by this repository's encoder; foreign encodings are rejected rather than guessed; every decoded length equals the encoder's pushed length for the same form.
 // CEP:COST: O(bytes) single pass.
-// CEP:EVIDENCE: golden disassembly tests compare this output byte-for-byte.
+// CEP:EVIDENCE: golden disassembly tests compare this output byte-for-byte; replay harness derives probe offsets from this decoder.
 // CEP:TARGET: x86-64
+
+use crate::disasm_text::{
+    alu_ext_name, alu_name, cc_name, copy_str, finish, finish_text, render_reg2, render_reg_imm,
+    render_reg_imm64, render_slot_imm, render_slot_load, render_slot_store, render_sse,
+    render_sse_mem, sse_mem_name, sse_name, write_num,
+};
 
 /// One decoded instruction rendering.
 pub struct Line {
@@ -19,7 +25,13 @@ pub struct Line {
     pub len: usize,
 }
 
-/// Disassembles the buffer into a bounded list of rendered lines.
+// CEP:WHAT: Disassembles the buffer into a bounded list of rendered lines.
+// CEP:WHY: Evidence tooling and the replay harness both need the full instruction sequence with byte offsets in one pass.
+// CEP:STATUS: complete
+// CEP:FAILURE: Stops at the first undecodable byte and returns the lines decoded so far; the caller detects truncation by count.
+// CEP:ASSUMES: input was produced by this repository's encoder.
+// CEP:COST: O(bytes) single pass with no allocation.
+// CEP:EVIDENCE: golden disassembly tests compare this output byte-for-byte.
 pub fn disassemble(bytes: &[u8], out: &mut [Line]) -> usize {
     let mut count = 0usize;
     let mut offset = 0usize;
@@ -36,43 +48,46 @@ pub fn disassemble(bytes: &[u8], out: &mut [Line]) -> usize {
     count
 }
 
+// CEP:WHAT: Decodes one instruction at the given offset: pattern-matches the encoder's exact forms, fills the line, and returns the end offset.
+// CEP:WHY: Instruction boundaries drive golden evidence and replay probe placement; a decoder that matches the encoder byte-for-byte turns any emission drift into a loud failure.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns None at the first byte sequence the encoder cannot produce.
+// CEP:ASSUMES: offset is within bytes; the stream was emitted by this repository's encoder.
+// CEP:COST: O(instruction bytes) per call.
+// CEP:EVIDENCE: golden disassembly tests; replay harness probe offsets.
 fn decode_one(bytes: &[u8], offset: usize, line: &mut Line) -> Option<usize> {
     line.offset = offset;
     line.len = 0;
-    let mut at = offset;
+    let at = offset;
     let byte0 = *bytes.get(at)?;
     if byte0 == 0x90 {
-        return finish(line, &mut at, "nop", bytes, 1);
+        return finish(line, at + 1, "nop");
     }
     if byte0 == 0xC3 {
-        return finish(line, &mut at, "ret", bytes, 1);
+        return finish(line, at + 1, "ret");
     }
     if byte0 == 0x53 {
-        return finish(line, &mut at, "push rbx", bytes, 1);
+        return finish(line, at + 1, "push rbx");
     }
     if byte0 == 0x5B {
-        return finish(line, &mut at, "pop rbx", bytes, 1);
+        return finish(line, at + 1, "pop rbx");
     }
     if byte0 == 0x5C {
-        return finish(line, &mut at, "pop rsp", bytes, 1);
+        return finish(line, at + 1, "pop rsp");
     }
     if byte0 == 0x48 && bytes.get(at + 1) == Some(&0x83) && bytes.get(at + 2) == Some(&0xEC) {
-        at += 3;
-        let imm = *bytes.get(at)?;
-        at += 1;
+        let imm = *bytes.get(at + 3)?;
         let mut text = [0u8; 96];
         let mut n = copy_str(&mut text, 0, "sub rsp, ");
-        n += write_num(&mut text, n, imm as u32);
-        return finish_text(line, &mut at, &text, n, 0);
+        n = write_num(&mut text, n, imm as u64);
+        return finish_text(line, at + 4, &text, n);
     }
     if byte0 == 0x48 && bytes.get(at + 1) == Some(&0x83) && bytes.get(at + 2) == Some(&0xC4) {
-        at += 3;
-        let imm = *bytes.get(at)?;
-        at += 1;
+        let imm = *bytes.get(at + 3)?;
         let mut text = [0u8; 96];
         let mut n = copy_str(&mut text, 0, "add rsp, ");
-        n += write_num(&mut text, n, imm as u32);
-        return finish_text(line, &mut at, &text, n, 0);
+        n = write_num(&mut text, n, imm as u64);
+        return finish_text(line, at + 4, &text, n);
     }
     if byte0 == 0x41 {
         let byte1 = *bytes.get(at + 1)?;
@@ -85,174 +100,245 @@ fn decode_one(bytes: &[u8], offset: usize, line: &mut Line) -> Option<usize> {
             0x5C => "pop r12",
             _ => return None,
         };
-        at += 2;
-        return finish(line, &mut at, name, bytes, 0);
+        return finish(line, at + 2, name);
     }
-    if byte0 & 0xF0 == 0x40 && bytes.get(at + 1) == Some(&0x89) && bytes.get(at + 2)? & 0xC0 == 0xC0 {
-        let (dst, src) = reg_pair(bytes[at + 2], byte0);
-        at += 3;
-        return finish_reg2(line, &mut at, "mov", dst, src);
-    }
-    if byte0 & 0xF0 == 0x40 && bytes.get(at + 1)? & 0xF8 == 0xB8 {
-        let dst = reg_single(bytes[at + 1], byte0);
-        at += 2;
-        let mut value: u64 = 0;
-        for shift in 0..8usize {
-            value |= (*bytes.get(at + shift)? as u64) << (shift * 8);
+    // REX-prefixed forms (0x40..0x4F).
+    if byte0 & 0xF0 == 0x40 {
+        let rex = byte0;
+        let byte1 = *bytes.get(at + 1)?;
+        if byte1 == 0x89 && *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+            let (rm, reg) = modrm_pair(bytes[at + 2], rex);
+            let mut text = [0u8; 96];
+            let n = render_reg2(&mut text, "mov", rm, reg);
+            return finish_text(line, at + 3, &text, n);
         }
-        at += 8;
-        return finish_reg_imm64(line, &mut at, "movabs", dst, value);
-    }
-    if byte0 & 0xF0 == 0x40 && bytes.get(at + 1) == Some(&0xC7) && bytes.get(at + 2)? & 0xC7 == 0x43 {
-        let disp = read_le32(bytes, at + 3)?;
-        let imm = read_le32(bytes, at + 7)?;
-        at += 11;
-        return finish_slot_store(line, &mut at, imm, disp);
-    }
-    if byte0 & 0xF0 == 0x40 && (bytes.get(at + 1) == Some(&0x8B) || bytes.get(at + 1) == Some(&0x89))
-        && bytes.get(at + 2)? & 0xC7 == 0x43
-    {
-        let op = if bytes[at + 1] == 0x8B { "mov" } else { "mov.store" };
-        let reg = reg_single(bytes[at + 2], byte0);
-        let disp = read_le32(bytes, at + 3)?;
-        at += 7;
-        return finish_slot(line, &mut at, op, reg, disp);
-    }
-    if byte0 & 0xF0 == 0x40 && bytes.get(at + 1) == Some(&0xC1) {
-        let opext = (bytes[at + 2] >> 3) & 7;
-        let dst = reg_single(bytes[at + 2], byte0);
-        let imm = *bytes.get(at + 3)?;
-        let name = if opext == 4 { "shl" } else if opext == 5 { "shr" } else { return None };
-        at += 4;
-        return finish_reg_imm(line, &mut at, name, dst, imm as u32);
-    }
-    if (byte0 == 0x66 || byte0 == 0xF2) && bytes.get(at + 1)? & 0xF0 == 0x40 {
-        let prefix = byte0;
-        let rex = bytes[at + 1];
-        let opcode = *bytes.get(at + 2)?;
-        let modrm = *bytes.get(at + 3)?;
-        if opcode == 0x0F && modrm & 0xC0 == 0xC0 {
-            let (dst, src) = sse_pair(modrm, rex);
-            let name = sse_name(prefix, opcode);
-            at += 4;
-            return finish_sse(line, &mut at, name, dst, src);
+        if byte1 == 0x8B && bytes.get(at + 2)? & 0xC7 == 0x83 {
+            let dst = reg_from_reg_field(bytes[at + 2], rex);
+            let disp = read_le32(bytes, at + 3)?;
+            let mut text = [0u8; 96];
+            let n = render_slot_load(&mut text, "mov", dst, disp);
+            return finish_text(line, at + 7, &text, n);
         }
-        if opcode == 0x0F && modrm & 0xC7 == 0x84 {
-            let sib = *bytes.get(at + 4)?;
-            let disp = read_le32(bytes, at + 5)?;
-            let xmm = sse_reg(modrm, rex);
-            let name = sse_mem_name(prefix, opcode);
-            at += 9;
-            return finish_sse_mem(line, &mut at, name, xmm, sib, disp);
+        if byte1 == 0x89 && bytes.get(at + 2)? & 0xC7 == 0x83 {
+            let src = reg_from_reg_field(bytes[at + 2], rex);
+            let disp = read_le32(bytes, at + 3)?;
+            let mut text = [0u8; 96];
+            let n = render_slot_store(&mut text, "mov", src, disp);
+            return finish_text(line, at + 7, &text, n);
         }
-        return None;
+        if byte1 == 0xC7 && *bytes.get(at + 2)? & 0xC7 == 0x83 {
+            let disp = read_le32(bytes, at + 3)?;
+            let imm = read_le32(bytes, at + 7)?;
+            let mut text = [0u8; 96];
+            let n = render_slot_imm(&mut text, disp, imm);
+            return finish_text(line, at + 11, &text, n);
+        }
+        if byte1 == 0xC7 && *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+            let dst = reg_from_reg_field(bytes[at + 2], rex);
+            let imm = read_le32(bytes, at + 3)?;
+            let mut text = [0u8; 96];
+            let n = render_reg_imm64(&mut text, "mov", dst, imm as i64 as u64);
+            return finish_text(line, at + 7, &text, n);
+        }
+        if byte1 & 0xF8 == 0xB8 {
+            let dst = reg_from_rm_bit(bytes[at + 1], rex);
+            let mut value: u64 = 0;
+            for shift in 0..8usize {
+                value |= (*bytes.get(at + 2 + shift)? as u64) << (shift * 8);
+            }
+            let mut text = [0u8; 96];
+            let n = render_reg_imm64(&mut text, "movabs", dst, value);
+            return finish_text(line, at + 10, &text, n);
+        }
+        match byte1 {
+            0x01 | 0x29 | 0x31 | 0x39 => {
+                if *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+                    let (rm, reg) = modrm_pair(bytes[at + 2], rex);
+                    let name = alu_name(byte1);
+                    let mut text = [0u8; 96];
+                    let n = render_reg2(&mut text, name, rm, reg);
+                    return finish_text(line, at + 3, &text, n);
+                }
+                return None;
+            }
+            0x83 => {
+                if *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+                    let dst = reg_from_rm_bit(bytes[at + 2], rex);
+                    let ext = (bytes[at + 2] >> 3) & 7;
+                    let imm = *bytes.get(at + 3)? as i8 as i64 as u64;
+                    let mut text = [0u8; 96];
+                    let n = render_reg_imm64(&mut text, alu_ext_name(ext), dst, imm);
+                    return finish_text(line, at + 4, &text, n);
+                }
+                return None;
+            }
+            0x81 => {
+                if *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+                    let dst = reg_from_rm_bit(bytes[at + 2], rex);
+                    let ext = (bytes[at + 2] >> 3) & 7;
+                    let imm = read_le32(bytes, at + 3)?;
+                    let mut text = [0u8; 96];
+                    let n = render_reg_imm64(&mut text, alu_ext_name(ext), dst, imm as i64 as u64);
+                    return finish_text(line, at + 7, &text, n);
+                }
+                return None;
+            }
+            0xC1 => {
+                if *bytes.get(at + 2)? & 0xC0 == 0xC0 {
+                    let dst = reg_from_rm_bit(bytes[at + 2], rex);
+                    let ext = (bytes[at + 2] >> 3) & 7;
+                    let imm = *bytes.get(at + 3)?;
+                    let name = match ext {
+                        4 => "shl",
+                        5 => "shr",
+                        7 => "sar",
+                        _ => return None,
+                    };
+                    let mut text = [0u8; 96];
+                    let n = render_reg_imm(&mut text, name, dst, imm as u32);
+                    return finish_text(line, at + 4, &text, n);
+                }
+                return None;
+            }
+            0x0F => {
+                let opcode = *bytes.get(at + 2)?;
+                let modrm = *bytes.get(at + 3)?;
+                if opcode == 0xAF && modrm & 0xC0 == 0xC0 {
+                    let dst = reg_from_reg_field(modrm, rex);
+                    let src = reg_from_rm_bit(modrm, rex);
+                    let mut text = [0u8; 96];
+                    let n = render_reg2(&mut text, "imul", dst, src);
+                    return finish_text(line, at + 4, &text, n);
+                }
+                if opcode & 0xF0 == 0x90 && modrm & 0xC0 == 0xC0 {
+                    let dst = reg_from_rm_bit(modrm, rex);
+                    let cc = opcode & 0x0F;
+                    let mut text = [0u8; 96];
+                    let mut n = copy_str(&mut text, 0, "set");
+                    n = copy_str(&mut text, n, cc_name(cc));
+                    n = copy_str(&mut text, n, " r");
+                    n = write_num(&mut text, n, dst as u64);
+                    return finish_text(line, at + 4, &text, n);
+                }
+                if opcode == 0xB6 && modrm & 0xC0 == 0xC0 {
+                    let dst = reg_from_reg_field(modrm, rex);
+                    let src = reg_from_rm_bit(modrm, rex);
+                    let mut text = [0u8; 96];
+                    let n = render_reg2(&mut text, "movzx", dst, src);
+                    return finish_text(line, at + 4, &text, n);
+                }
+                return None;
+            }
+            _ => return None,
+        }
     }
-    if byte0 == 0x0F && bytes.get(at + 1)? & 0xF0 == 0x80 {
-        let cc = bytes[at + 1] & 0x0F;
-        let rel = read_le32(bytes, at + 2)?;
-        at += 6;
-        return finish_branch(line, &mut at, "j", cc as u32, rel);
+    // Prefixed SSE forms: prefix, REX, 0F, opcode, ModRM.
+    if byte0 == 0x66 || byte0 == 0xF2 {
+        let rex = *bytes.get(at + 1)?;
+        if rex & 0xF0 != 0x40 {
+            return None;
+        }
+        if *bytes.get(at + 2)? != 0x0F {
+            return None;
+        }
+        return decode_prefixed_sse(bytes, at, byte0, rex, line);
     }
-    if byte0 == 0xE9 {
+    if byte0 == 0x0F {
+        return decode_0f_norex(bytes, at, line);
+    }
+    if byte0 == 0xE9 || byte0 == 0xE8 {
         let rel = read_le32(bytes, at + 1)?;
-        at += 5;
-        return finish_branch(line, &mut at, "jmp", 0, rel);
-    }
-    if byte0 == 0xE8 {
-        let rel = read_le32(bytes, at + 1)?;
-        at += 5;
-        return finish_branch(line, &mut at, "call", 0, rel);
+        let name = if byte0 == 0xE9 { "jmp" } else { "call" };
+        let mut text = [0u8; 96];
+        let mut n = copy_str(&mut text, 0, name);
+        n = copy_str(&mut text, n, " rel=");
+        n = write_num(&mut text, n, rel as u64);
+        return finish_text(line, at + 5, &text, n);
     }
     None
 }
 
-fn reg_pair(modrm: u8, rex: u8) -> (u8, u8) {
-    let dst = ((rex & 1) << 3) | (modrm & 7);
-    let src = ((rex >> 2) & 1) << 3 | ((modrm >> 3) & 7);
-    (dst, src)
+// CEP:WHAT: Decodes one prefixed SSE form: prefix, REX, 0F, opcode, ModRM, with register-register or SIB memory operands.
+// CEP:WHY: Heap SSE accesses always use r15-relative SIB addressing; the decoder resolves xmm, index, scale, and displacement for evidence.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns None for operand shapes the encoder cannot produce.
+// CEP:ASSUMES: prefix is 66 or F2 and the following byte is a REX prefix.
+// CEP:COST: O(instruction bytes) per call.
+// CEP:EVIDENCE: golden disassembly tests.
+fn decode_prefixed_sse(bytes: &[u8], at: usize, prefix: u8, rex: u8, line: &mut Line) -> Option<usize> {
+    let opcode = *bytes.get(at + 3)?;
+    let modrm = *bytes.get(at + 4)?;
+    if modrm & 0xC0 == 0xC0 {
+        let dst = reg_from_reg_field(modrm, rex);
+        let src = reg_from_rm_bit(modrm, rex);
+        let name = sse_name(prefix, opcode);
+        let mut text = [0u8; 96];
+        let n = render_sse(&mut text, name, dst, src);
+        return finish_text(line, at + 5, &text, n);
+    }
+    if modrm & 0xC7 == 0x84 {
+        let sib = *bytes.get(at + 5)?;
+        let disp = read_le32(bytes, at + 6)?;
+        let xmm = reg_from_reg_field(modrm, rex);
+        let index = sib_index(sib, rex);
+        let scale_bits = (sib >> 6) & 3;
+        let name = sse_mem_name(prefix, opcode);
+        let mut text = [0u8; 96];
+        let n = render_sse_mem(&mut text, name, xmm, index, scale_bits, disp);
+        return finish_text(line, at + 10, &text, n);
+    }
+    None
 }
 
-fn reg_single(modrm: u8, rex: u8) -> u8 {
+// CEP:WHAT: Decodes the REX-less 0F branch family (jcc rel32).
+// CEP:WHY: Conditional branches leave the trace through guard stubs; their offsets are patched rel32 fields the decoder must render.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns None for non-branch 0F forms.
+// CEP:ASSUMES: none
+// CEP:COST: O(instruction bytes) per call.
+// CEP:EVIDENCE: golden disassembly tests.
+fn decode_0f_norex(bytes: &[u8], at: usize, line: &mut Line) -> Option<usize> {
+    let byte1 = *bytes.get(at + 1)?;
+    if byte1 & 0xF0 == 0x80 {
+        let cc = byte1 & 0x0F;
+        let rel = read_le32(bytes, at + 2)?;
+        let mut text = [0u8; 96];
+        let mut n = copy_str(&mut text, 0, "j");
+        n = copy_str(&mut text, n, cc_name(cc));
+        n = copy_str(&mut text, n, " rel=");
+        n = write_num(&mut text, n, rel as u64);
+        return finish_text(line, at + 6, &text, n);
+    }
+    None
+}
+
+/// Register in the ModRM rm position, extended by REX.B.
+fn reg_from_rm_bit(modrm: u8, rex: u8) -> u8 {
     ((rex & 1) << 3) | (modrm & 7)
 }
 
-fn sse_pair(modrm: u8, rex: u8) -> (u8, u8) {
-    let dst = ((rex >> 2) & 1) << 3 | (modrm >> 3) & 7;
-    let src = ((rex >> 1) & 1) << 3 | (modrm & 7);
-    (dst, src)
+/// Register in the ModRM reg position, extended by REX.R.
+fn reg_from_reg_field(modrm: u8, rex: u8) -> u8 {
+    (((rex >> 2) & 1) << 3) | ((modrm >> 3) & 7)
 }
 
-fn sse_reg(modrm: u8, rex: u8) -> u8 {
-    ((rex >> 2) & 1) << 3 | (modrm >> 3) & 7
+/// reg/rm pair of a register-register ModRM byte: (rm with B, reg with R).
+fn modrm_pair(modrm: u8, rex: u8) -> (u8, u8) {
+    (reg_from_rm_bit(modrm, rex), reg_from_reg_field(modrm, rex))
 }
 
-fn sse_name(prefix: u8, opcode: u8) -> &'static str {
-    match (prefix, opcode) {
-        (0xF2, 0x10) => "movsd",
-        (0xF2, 0x58) => "addsd",
-        (0xF2, 0x5C) => "subsd",
-        (0xF2, 0x59) => "mulsd",
-        (0xF2, 0x5E) => "divsd",
-        (0xF2, 0x51) => "sqrtsd",
-        (0x66, 0x2E) => "ucomisd",
-        (0x66, 0xEF) => "pxor",
-        (0x66, 0x58) => "addpd",
-        (0x66, 0x5C) => "subpd",
-        (0x66, 0x59) => "mulpd",
-        (0x66, 0x14) => "unpcklpd",
-        (0x66, 0x15) => "unpckhpd",
-        (0x66, 0x6E) => "movq",
-        (0x66, 0x7E) => "movq",
-        (0x66, 0x28) => "movapd",
-        (0x66, 0x29) => "movapd.store",
-        (0xF2, 0x2A) => "cvtsi2sd",
-        (0xF2, 0x2C) => "cvttsd2si",
-        _ => "sse",
-    }
+/// SIB index register, extended by REX.X.
+fn sib_index(sib: u8, rex: u8) -> u8 {
+    (((rex >> 1) & 1) << 3) | ((sib >> 3) & 7)
 }
 
-fn sse_mem_name(prefix: u8, opcode: u8) -> &'static str {
-    match (prefix, opcode) {
-        (0x66, 0x28) => "movapd.load",
-        (0x66, 0x29) => "movapd.store",
-        (0xF2, 0x10) => "movsd.load",
-        (0xF2, 0x11) => "movsd.store",
-        _ => "sse.mem",
-    }
-}
-
-fn copy_str(out: &mut [u8], mut at: usize, text: &str) -> usize {
-    for byte in text.bytes() {
-        if at < out.len() {
-            out[at] = byte;
-        }
-        at += 1;
-    }
-    at
-}
-
-fn write_num(out: &mut [u8], mut at: usize, mut value: u32) -> usize {
-    let mut scratch = [0u8; 12];
-    let mut len = 0usize;
-    if value == 0 {
-        scratch[0] = b'0';
-        len = 1;
-    }
-    while value > 0 {
-        scratch[len] = b'0' + (value % 10) as u8;
-        value /= 10;
-        len += 1;
-    }
-    while len > 0 {
-        len -= 1;
-        if at < out.len() {
-            out[at] = scratch[len];
-        }
-        at += 1;
-    }
-    at
-}
-
+// CEP:WHAT: Reads one little-endian i32 displacement or immediate at the given offset.
+// CEP:WHY: Every disp32/im32 form needs the same bounded read; one helper keeps bounds checking uniform.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns None when fewer than four bytes remain.
+// CEP:ASSUMES: none
+// CEP:COST: O(1).
+// CEP:EVIDENCE: golden disassembly tests.
 fn read_le32(bytes: &[u8], at: usize) -> Option<i32> {
     if at + 4 > bytes.len() {
         return None;
@@ -263,117 +349,4 @@ fn read_le32(bytes: &[u8], at: usize) -> Option<i32> {
         bytes[at + 2],
         bytes[at + 3],
     ]))
-}
-
-fn finish(line: &mut Line, at: &mut usize, name: &str, _bytes: &[u8], extra: usize) -> Option<usize> {
-    let _ = extra;
-    line.len = copy_str(&mut line.text, 0, name);
-    *at += line.len;
-    Some(*at)
-}
-
-fn finish_text(line: &mut Line, at: &mut usize, text: &[u8], len: usize, _pad: usize) -> Option<usize> {
-    line.text[..len.min(96)].copy_from_slice(&text[..len.min(96)]);
-    line.len = len.min(96);
-    *at += line.len;
-    Some(*at)
-}
-
-fn finish_reg2(line: &mut Line, at: &mut usize, name: &str, dst: u8, src: u8) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " r");
-    n += write_num(&mut line.text, n, dst as u32);
-    n = copy_str(&mut line.text, n, ", r");
-    n += write_num(&mut line.text, n, src as u32);
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_reg_imm(line: &mut Line, at: &mut usize, name: &str, dst: u8, imm: u32) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " r");
-    n += write_num(&mut line.text, n, dst as u32);
-    n = copy_str(&mut line.text, n, ", ");
-    n += write_num(&mut line.text, n, imm);
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_reg_imm64(line: &mut Line, at: &mut usize, name: &str, dst: u8, value: u64) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " r");
-    n += write_num(&mut line.text, n, dst as u32);
-    n = copy_str(&mut line.text, n, ", ");
-    n += write_num(&mut line.text, n, value as u32);
-    n += write_num(&mut line.text, n, (value >> 32) as u32);
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_slot(line: &mut Line, at: &mut usize, name: &str, reg: u8, disp: i32) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " r");
-    n += write_num(&mut line.text, n, reg as u32);
-    n = copy_str(&mut line.text, n, ", [rbx");
-    if disp >= 0 {
-        n = copy_str(&mut line.text, n, "+");
-    }
-    n += write_num(&mut line.text, n, disp as u32);
-    n = copy_str(&mut line.text, n, "]");
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_slot_store(line: &mut Line, at: &mut usize, imm: i32, disp: i32) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, "mov qword [rbx");
-    if disp >= 0 {
-        n = copy_str(&mut line.text, n, "+");
-    }
-    n += write_num(&mut line.text, n, disp as u32);
-    n = copy_str(&mut line.text, n, "], ");
-    n += write_num(&mut line.text, n, imm as u32);
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_sse(line: &mut Line, at: &mut usize, name: &str, dst: u8, src: u8) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " x");
-    n += write_num(&mut line.text, n, dst as u32);
-    n = copy_str(&mut line.text, n, ", x");
-    n += write_num(&mut line.text, n, src as u32);
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_sse_mem(line: &mut Line, at: &mut usize, name: &str, xmm: u8, sib: u8, disp: i32) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    n = copy_str(&mut line.text, n, " x");
-    n += write_num(&mut line.text, n, xmm as u32);
-    n = copy_str(&mut line.text, n, ", [r15+r");
-    n += write_num(&mut line.text, n, ((sib >> 3) & 7) as u32);
-    n = copy_str(&mut line.text, n, "+");
-    n += write_num(&mut line.text, n, disp as u32);
-    n = copy_str(&mut line.text, n, "]");
-    line.len = n;
-    *at += n;
-    Some(*at)
-}
-
-fn finish_branch(line: &mut Line, at: &mut usize, name: &str, cc: u32, rel: i32) -> Option<usize> {
-    let mut n = copy_str(&mut line.text, 0, name);
-    if cc != 0 {
-        n += write_num(&mut line.text, n, cc);
-    }
-    n = copy_str(&mut line.text, n, " rel=");
-    n += write_num(&mut line.text, n, rel as u32);
-    line.len = n;
-    *at += n;
-    Some(*at)
 }

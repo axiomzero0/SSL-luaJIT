@@ -224,7 +224,7 @@ impl<'a> Encoder<'a> {
         self.push_modrm(3, dst, src)
     }
 
-    /// Encodes jcc rel32 with a placeholder patched later.
+    /// Encodes jcc rel32 with a zero displacement patched later.
     pub fn jcc_rel32(&mut self, cc: u8) -> Result<usize, EncodeError> {
         self.push(0x0F)?;
         self.push(0x80 + cc)?;
@@ -233,7 +233,7 @@ impl<'a> Encoder<'a> {
         Ok(at)
     }
 
-    /// Encodes jmp rel32 with a placeholder patched later.
+    /// Encodes jmp rel32 with a zero displacement patched later.
     pub fn jmp_rel32(&mut self) -> Result<usize, EncodeError> {
         self.push(0xE9)?;
         let at = self.len;
@@ -241,7 +241,7 @@ impl<'a> Encoder<'a> {
         Ok(at)
     }
 
-    /// Encodes call rel32 with a placeholder patched later.
+    /// Encodes call rel32 with a zero displacement patched later.
     pub fn call_rel32(&mut self) -> Result<usize, EncodeError> {
         self.push(0xE8)?;
         let at = self.len;
@@ -310,12 +310,14 @@ impl<'a> Encoder<'a> {
         self.push_le32(disp as u32)
     }
 
-    /// Encodes movq [r15 + index*1 + disp32], imm0 (64-bit zero store via rax path).
+    /// Encodes mov qword [r15 + index*1 + disp32], imm32 (64-bit zero store).
     pub fn heap_zero_store(&mut self, index: u8, disp: i32) -> Result<(), EncodeError> {
         let rex = 0x49 | ((index >= 8) as u8) << 1;
         self.push(rex)?;
         self.push(0xC7)?;
-        self.push(0x44)?;
+        // mod=10 (disp32), reg=0 (/0), rm=4 (SIB); the pushed displacement is
+        // 32-bit, so the ModRM byte must declare mod=10 (0x84), not mod=01.
+        self.push(0x84)?;
         self.push((index & 7) << 3 | 7)?;
         self.push_le32(disp as u32)?;
         self.push_le32(0)
@@ -345,7 +347,7 @@ impl<'a> Encoder<'a> {
         self.push_le32(disp as u32)
     }
 
-    /// Patches a rel32 placeholder emitted earlier given the instruction end offset.
+    /// Patches a rel32 field emitted earlier given the instruction end offset.
     pub fn patch_rel32(&mut self, at: usize, target_offset: usize) -> Result<(), EncodeError> {
         if at + 4 > self.len {
             return Err(EncodeError::Overflow);

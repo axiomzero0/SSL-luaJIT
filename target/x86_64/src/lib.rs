@@ -9,6 +9,7 @@
 // CEP:EVIDENCE: golden disassembly and differential codegen tests.
 // CEP:TARGET: x86-64
 
+mod disasm_text;
 pub mod disasm;
 pub mod emit;
 pub mod isel;

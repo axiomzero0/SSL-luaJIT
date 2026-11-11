@@ -1,0 +1,34 @@
+.slots 8
+.const 0 = int 0
+.const 1 = int 1
+.const 2 = int 65
+.const 3 = int 200
+    LOADK 0, 0
+    LOADK 1, 2
+    LOADK 3, 3
+@loop:
+    GE 4, 0, 3
+    JMPIF 4, @done
+    ADDI 0, 0, 1
+    ADD 1, 1, 0
+    ADDI 5, 0, 7
+    ADD 1, 1, 5
+    ADDI 5, 0, -3
+    SUB 1, 1, 5
+    ADDI 5, 0, 13
+    MUL 5, 5, 0
+    ADD 1, 1, 5
+    ADDI 5, 1, 9
+    SUB 1, 1, 5
+    ADDI 5, 0, 21
+    ADDI 5, 5, 21
+    ADD 1, 1, 5
+    ADDI 5, 1, 33
+    ADD 1, 1, 5
+    SUB 1, 1, 0
+    ADDI 5, 0, 55
+    ADD 1, 1, 5
+    JMP @loop
+@done:
+    PRINT 1
+    RET 1

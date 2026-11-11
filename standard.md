@@ -14611,3 +14611,184 @@ Action: Move to `target/x86_64/crc32.cppm`, gate with `#if defined(__SSE4_2__)`,
 ```
 
 ---
+
+# 65. Continuous Bug Hunting (The Bloodhound Protocol)
+
+This chapter extends CEP&CC for the per-commit continuous integration pipeline. 
+Modern CI pipelines treat testing as a passive afterthought. "Run the unit tests, if they pass, merge." This is a dereliction of duty. Unit tests only prove the code works for the inputs the developer *imagined*. They do not prove the code survives the inputs the silicon and the adversary will throw at it.
+
+For CEP&CC, every commit that touches critical code must trigger an active, aggressive, diff-targeted bug hunt. You do not just "test" the code; you hunt it. 
+Where this chapter is stricter than Chapter 61 (The Crucible Protocol), this chapter wins. (Chapter 61 governs release-cycle quotas; Chapter 65 governs the per-commit gate).
+
+## 65.1 The Prime Directive: The Per-Commit Bloodhound
+> **You do not merge code you have not actively hunted.**
+> **A commit without a diff-targeted bug hunt is a liability.**
+> **The linter does not just check syntax; it checks for the scars of the hunt.**
+> **If you modified it, you must have hunted it. If you did not hunt it, the linter will yell at you and block the merge.**
+
+Violations of the Bloodhound Protocol are **Severity 0**. 
+
+## 65.2 The Ban on SMT for Per-Commit Gates
+Formal Verification (Chapter 54) uses SMT solvers and theorem provers. This is mandatory for release qualification. 
+However, SMT solvers are **strictly banned** as the primary per-commit bug hunt mechanism.
+
+**Why SMT is banned for per-commit gates:**
+1. **Too Slow:** A per-commit gate must complete in minutes. SMT solvers suffer from state-space explosion and can hang for hours.
+2. **CI Starvation:** Blocking a CI queue for 45 minutes waiting for a Z3 timeout wastes massive compute resources.
+3. **Axiom Faking:** To make SMT pass quickly, developers will silently introduce `axiom` or `sorry` equivalents, creating a false sense of security.
+
+**What we use instead:**
+Per-commit bug hunting relies on **fast, aggressive, heuristic-driven, and fuzz-driven** techniques that complete in under 3 minutes.
+
+## 65.3 Detailed Mechanics of the Per-Commit Hunt
+When a commit modifies a CEP-0, HPC-0, or RCS-0 component, the CI pipeline automatically spawns the `cep_hunt` daemon. The hunt consists of three mechanical phases.
+
+### 65.3.1 Phase 1: Diff-Targeted Grammar-Aware Fuzzing
+The fuzzer does not perform dumb byte-mutation. It uses a custom mutator that understands the structural invariants of the IR, AST, or binary format.
+1. **Target Extraction:** The CI parses the `git diff` and identifies the exact functions modified.
+2. **Harness Generation:** A targeted harness is dynamically linked that bypasses the parser and injects data directly into the modified function.
+3. **Grammar Mutation:** The fuzzer mutates the inputs using grammar rules (e.g., preserving opcode boundaries, maintaining valid IR use-def chains).
+4. **Quota:** The modified functions must be fuzzed for a minimum of **100,000 executions** (or 60 seconds of wall-clock time, whichever is higher).
+
+### 65.3.2 Phase 2: Differential Execution
+The fuzzer's corpus is saved. The CI then builds the `HEAD` (new) binary and the `HEAD~1` (baseline) binary.
+1. **Corpus Replay:** Both binaries are fed the exact same 10,000 complex inputs (40% worst-case, 40% adversarial, 20% happy-path).
+2. **Bitwise/Semantic Diff:** The outputs are compared. If the new binary produces a different output, crashes, or triggers a sanitizer failure that the baseline did not, it is a **divergence**.
+3. **Quota:** 10,000 differential executions. Divergences must be exactly 0 (unless explicitly waived as an intentional semantic change).
+
+### 65.3.3 Phase 3: Cold-Path Mutation Testing
+To prove the fast path correctly handles the fallout of cold-path validation failures, the CI injects faults.
+1. **Mutation:** The build system injects **50 targeted mutations** (e.g., flipped bounds, off-by-one, null pointers) into the surrounding cold-path validation code.
+2. **Observation:** The fast path is executed against these mutated cold paths.
+3. **Quota:** The fast path must gracefully evacuate to the error handler or return a status code in 100% of the mutations. If it triggers Undefined Behavior, the hunt fails.
+
+## 65.4 The Hunt Receipt and Cryptographic Provenance
+The CI runner generates a **Hunt Receipt**. This receipt is not a simple text file; it is a cryptographically signed JSON manifest proving the hunt occurred.
+
+### 65.4.1 Receipt Structure
+```json
+{
+  "receipt_id": "uuid-v4",
+  "commit_hash": "abc123def",
+  "baseline_hash": "987654321",
+  "ci_runner_id": "runner-04",
+  "signature": "ed25519_signature_from_ci_private_key",
+  "targets": [
+    {
+      "file": "hot/decoder/opcode_decoder.cpp",
+      "function": "decode_opcode",
+      "fuzz_executions": 154000,
+      "diff_inputs": 10000,
+      "divergences": 0,
+      "mutations_survived": 50,
+      "duration_ms": 42000
+    }
+  ],
+  "timestamp": "2026-11-12T14:32:00Z"
+}
+```
+
+### 65.4.2 Provenance
+The receipt is signed by the CI runner's private key. The repository contains the corresponding public key in `.cep/keys/ci_runner.pub`. This prevents developers from manually editing the JSON to fake the execution counts.
+
+## 65.5 Mechanical Enforcement: `cep_lint`
+The linter (`cep_lint`) is the enforcer. It does not trust the developer's word. It demands the Hunt Receipt.
+
+### Rule CEP-LINT-HUNT-RECEIPT
+**Severity 0. Check: `commit_hunt_manifest`.**
+When invoked with `--verify-hunt`, the linter performs the following mechanical steps:
+1. Parses the `git diff` to identify all modified functions in CEP-0/HPC-0/RCS-0 files.
+2. Locates the Hunt Receipt JSON in the commit artifacts.
+3. **Verifies the cryptographic signature** using the trusted public key.
+4. Cross-references the modified functions against the `targets` array in the receipt.
+5. Checks that `fuzz_executions >= 100,000` and `diff_inputs >= 10,000`.
+6. Checks that `divergences == 0`.
+
+If *any* of these checks fail, `cep_lint` exits with code 1 and emits the Yell Protocol.
+
+## 65.6 The "Yell at You" Protocol
+When `cep_lint` detects a missing, insufficient, or tampered hunt receipt, it does not silently fail. It yells. The CI output must be unambiguous and aggressive.
+
+**Example CI Output:**
+```text
+[CEP-LINT] SEVERITY 0: BLOODHOUND PROTOCOL VIOLATION
+[CEP-LINT] You modified `hot/decoder/opcode_decoder.cpp`.
+[CEP-LINT] You did NOT provide a cryptographically signed Hunt Receipt.
+[CEP-LINT] You did NOT fuzz the diff.
+[CEP-LINT] You are attempting to merge un-hunted, un-proven code into the mainline.
+[CEP-LINT] This is a Severity 0 defect. The merge is BLOCKED.
+[CEP-LINT] Run `tools/cep_hunt --diff HEAD~1` and attach the signed receipt.
+[CEP-LINT] EXTERMINATE THE COMMIT.
+```
+
+## 65.7 The Integrity Mandate: NEVER FAKE EVIDENCE OR WAIVERS
+This is the most critical rule in this chapter. 
+
+> **NEVER FAKE WAIVERS, RECEIPTS, OR EVIDENCE.**
+> **Falsifying a hunt receipt, forging a waiver signature, or manipulating benchmark evidence is not a coding defect. It is a catastrophic integrity breach.**
+
+If you attempt to fake a waiver, bypass the linter, or forge a hunt receipt:
+1. **You are immediately banned from the project.**
+2. **You are blacklisted from all affiliated repositories, organizations, and partner projects.**
+3. **Maintainers of external projects are formally notified of your integrity failure.**
+
+There are no appeals. There are no emergency waivers for integrity breaches. A developer who lies about evidence is a security liability that cannot be mitigated by code review.
+
+### 65.7.1 Linter Detection of Tampering
+Because the Hunt Receipt is cryptographically signed by the CI runner, any manual edit to the JSON (e.g., changing `"fuzz_executions": 100` to `"fuzz_executions": 100000"`) will break the signature. 
+If `cep_lint` detects a broken signature, it does not just fail the build; it triggers an **Integrity Breach Extermination**.
+
+## 65.8 Extermination Examples (The Bloodhound Protocol)
+
+### Example 1: The "I Ran the Unit Tests" Defense
+**Violation:** Developer modifies a hot loop. CI runs 50 unit tests. They pass. Developer merges.
+**Response:**
+```text
+EXTERMINATE
+Reason: Unit tests are not a bug hunt. No cryptographically signed Hunt Receipt provided.
+Rule: CEP&CC 65.5
+Action: Revert commit. Force developer to run `cep_hunt` and attach receipt.
+```
+
+### Example 2: The SMT Timeout Trap
+**Violation:** Developer adds a Z3 script to the per-commit CI to "prove" the loop is safe. The CI hangs for 45 minutes and times out.
+**Response:**
+```text
+EXTERMINATE
+Reason: SMT solvers are banned for per-commit gates (65.2). They cause CI starvation.
+Rule: CEP&CC 65.2
+Action: Remove Z3 script from per-commit gate. Replace with 60-second diff-fuzz.
+```
+
+### Example 3: Faking the Hunt Receipt (Integrity Breach)
+**Violation:** Developer manually edits `.cep/hunt_receipts/abc123.json` to claim 1,000,000 fuzz executions, but the CI hash-check proves the fuzzer only ran for 2 seconds. The signature is invalid.
+**Response:**
+```text
+EXTERMINATE (INTEGRITY BREACH)
+Reason: Falsification of hunt evidence. The cryptographic signature is invalid.
+Rule: CEP&CC 65.7 (The Integrity Mandate)
+Action: Revert commit. IMMEDIATELY BAN THE DEVELOPER. BLACKLIST FROM ALL PROJECTS. 
+        NOTIFY EXTERNAL MAINTAINERS. Falsified evidence is a career-ending integrity failure.
+```
+
+### Example 4: Faking a Waiver (Integrity Breach)
+**Violation:** Developer needs to merge a hot-path allocation. They forge a signature on a `.cep/waivers/` YAML file to make it look like the security and performance leads approved it.
+**Response:**
+```text
+EXTERMINATE (INTEGRITY BREACH)
+Reason: Forged waiver signature. 
+Rule: CEP&CC 65.7 (The Integrity Mandate) / 34.7
+Action: Revert commit. IMMEDIATELY BAN THE DEVELOPER. BLACKLIST FROM ALL PROJECTS.
+        Never fake a waiver. It will get you banned and notified on other projects.
+```
+
+## 65.9 Summary of the Bloodhound Protocol
+The Bloodhound Protocol ensures that no un-hunted code ever reaches the mainline. Its core tenets are:
+
+1. **Mandatory Diff-Targeted Hunting:** Every commit modifying critical code must be fuzzed (100k+ executions), differentially executed (10k+ inputs), and mutation-tested (50 faults).
+2. **No SMT in Per-Commit Gates:** SMT solvers are too slow for CI. We use fast, grammar-aware fuzzing and differential execution instead.
+3. **Cryptographic Provenance:** The CI runner generates a cryptographically signed Hunt Receipt. The linter verifies this signature and the quotas mechanically.
+4. **Aggressive Enforcement:** If the receipt is missing or insufficient, `cep_lint` blocks the merge and yells at the developer.
+5. **The Integrity Mandate:** **NEVER FAKE WAIVERS OR RECEIPTS.** Falsifying evidence or forging signatures is a catastrophic integrity breach resulting in immediate banning, blacklisting, and notification to external projects. There are zero exceptions.
+
+---

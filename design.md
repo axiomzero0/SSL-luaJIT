@@ -2,7 +2,7 @@
 
 ## Part 1: Core Architectural Philosophy
 
-LuaJIT-NG achieves near zero overhead through three strict architectural rules:
+SSL-LuaJIT achieves near zero overhead through three strict architectural rules:
 1. **Decoupled Recording and Graphification:** The interpreter records a flat, linear sequence of operations. The complex graph is only constructed in a single pass *after* the trace is closed.
 2. **Structure of Arrays (SoA) over Arrays of Structures (AoS):** The high-level Intermediate Representation (IR) abandons pointer-based node objects. Instead, it uses parallel, contiguous arrays. This transforms graph traversal from random memory access (pointer chasing) into sequential memory scanning, allowing the compiler to run at memory-bandwidth speeds.
 3. **Trace-Local Scope:** A trace is inherently a single-entry, single-exit straight line with one loop backedge. We exploit this to trivialize dominance, eliminate the need for complex CFG construction, and reduce multi-path dataflow analyses to simple linear sweeps.

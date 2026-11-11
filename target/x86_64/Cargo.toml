@@ -1,0 +1,18 @@
+[package]
+name = "ssl-target-x86-64"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "x86-64 backend: ISA encoder, DP instruction selection, linear-scan register allocation, emission with peephole, deterministic disassembler."
+
+[features]
+default = []
+trace-debug = []
+
+[dependencies]
+ssl-config = { path = "../../config" }
+ssl-hot = { path = "../../hot" }
+ssl-ffi = { path = "../../ffi" }
+
+[lib]
+crate-type = ["rlib"]

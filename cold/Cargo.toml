@@ -1,0 +1,16 @@
+[package]
+name = "ssl-cold"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cold path: bytecode assembler validation airlock, string interner, diagnostics, and the JIT driver."
+
+[dependencies]
+ssl-config = { path = "../config" }
+ssl-hot = { path = "../hot", features = ["trace-debug"] }
+ssl-target-x86-64 = { path = "../target/x86_64", features = ["trace-debug"] }
+ssl-ffi = { path = "../ffi" }
+
+[[bin]]
+name = "ssljit"
+path = "src/bin/ssljit.rs"

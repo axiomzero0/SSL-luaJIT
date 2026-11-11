@@ -1,0 +1,13 @@
+# Build artifacts
+/build
+
+# Local secrets (never committed)
+.secrets/
+*.token
+
+# Cargo lock is kept; runtime junk is not
+**/*.rs.bk
+
+# Crash dumps
+/core
+/core.*

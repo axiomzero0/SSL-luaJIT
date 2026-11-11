@@ -1,0 +1,10 @@
+[package]
+name = "ssl-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FFI boundary: W^X code memory management and emitted-code entry under POSIX mmap."
+
+[dependencies]
+ssl-config = { path = "../config" }
+ssl-hot = { path = "../hot" }

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "config",
+    "hot",
+    "target/x86_64",
+    "ffi",
+    "cold",
+    "tools/cep_lint",
+    "tests",
+    "benches",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+overflow-checks = false
+
+[profile.dev]
+overflow-checks = true
+
+[profile.test]
+overflow-checks = true

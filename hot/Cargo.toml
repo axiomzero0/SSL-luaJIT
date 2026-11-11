@@ -1,0 +1,13 @@
+[package]
+name = "ssl-hot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEP-0 hot core of SSL-LuaJIT: VM state, interpreter, recorder, SoA IR, passes, vectorizer, MIR."
+
+[dependencies]
+ssl-config = { path = "../config" }
+
+[features]
+default = []
+trace-debug = []

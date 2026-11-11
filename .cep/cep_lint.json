@@ -1,0 +1,304 @@
+{
+  "standard": {
+    "name": "CEP&CC",
+    "version": "0.4",
+    "doc_path": "standard.md",
+    "heading_pattern": "^### (?:[0-9]+\\.[0-9]+\\.[0-9]+ )?(?:Rule |`cep_lint` Rule: )([A-Z][A-Z0-9-]+)$",
+    "version_pattern": "^Version: \\*\\*([0-9]+\\.[0-9]+)\\*\\*\\s*$"
+  },
+  "fail_on": [
+    0,
+    1
+  ],
+  "file_globs": [
+    "**/*.rs"
+  ],
+  "rules": {
+    "CEP-LINT-FILE-HEADER": {
+      "check": "comment_block_schema",
+      "mode": "file_header",
+      "severity": 1,
+      "message": "file header missing or malformed",
+      "params": {
+        "max_start_line": 20,
+        "required_fields": [
+          "FILE",
+          "WHAT",
+          "WHY",
+          "CLASS",
+          "STATUS",
+          "FAILURE",
+          "ASSUMES",
+          "COST",
+          "EVIDENCE"
+        ],
+        "class_field": "CLASS",
+        "allowed_classes": [
+          "CEP-0",
+          "CEP-1",
+          "CEP-2",
+          "CC",
+          "FFI",
+          "HPC-0",
+          "HPC-1",
+          "HPC-2",
+          "RCS-0",
+          "RCS-1",
+          "RCS-2"
+        ]
+      }
+    },
+    "CEP-LINT-FUNC-BLOCK": {
+      "check": "function_policy",
+      "mode": "block",
+      "severity": 1,
+      "message": "function missing CEP comment block",
+      "params": {
+        "fn_def_pattern": "^\\s*(?:pub(?:\\([a-z ]+\\))?\\s+)?(?:unsafe\\s+)?(?:extern\\s+\"[A-Za-z0-9]*\"\\s+)?(?:const\\s+)?(?:async\\s+)?fn\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "required_fields": [
+          "WHAT",
+          "WHY",
+          "STATUS",
+          "FAILURE",
+          "ASSUMES",
+          "COST",
+          "EVIDENCE"
+        ],
+        "min_body_statements": 2,
+        "gap_pattern": "^\\s*(#\\[[A-Za-z_(=!].*|pub(\\([a-z ]+\\))?|unsafe|extern(\\s+\"[A-Za-z0-9]*\")?|const|async)$"
+      }
+    },
+    "CEP-LINT-STATUS-VALUE": {
+      "check": "comment_block_schema",
+      "mode": "status_value",
+      "severity": 2,
+      "message": "invalid CEP:STATUS value",
+      "params": {
+        "status_field": "STATUS",
+        "allowed_values": [
+          "complete",
+          "partial",
+          "stub",
+          "placeholder"
+        ]
+      }
+    },
+    "CEP-LINT-TODO-OWNER": {
+      "check": "comment_regex",
+      "severity": 1,
+      "message": "anonymous work marker",
+      "params": {
+        "pattern": "\\b(TODO|FIXME|XXX|HACK)\\b",
+        "icase": true,
+        "suppression_pattern": "CEP:TODO\\("
+      }
+    },
+    "CEP-LINT-STUB-DECL": {
+      "check": "comment_block_schema",
+      "mode": "stub_requirements",
+      "severity": 1,
+      "message": "stub-like status without ownership",
+      "params": {
+        "status_field": "STATUS",
+        "statuses": [
+          "stub",
+          "partial",
+          "placeholder"
+        ],
+        "required_fields": [
+          "OWNER",
+          "TICKET"
+        ]
+      }
+    },
+    "CEP-LINT-PLACEHOLDER-COMMENT": {
+      "check": "comment_regex",
+      "severity": 1,
+      "message": "placeholder marker in comment",
+      "params": {
+        "pattern": "\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\b",
+        "icase": true,
+        "suppression_pattern": "CEP:[A-Z-]+:"
+      }
+    },
+    "CEP-LINT-PLACEHOLDER-TEXT": {
+      "check": "string_literal_regex",
+      "severity": 1,
+      "message": "placeholder marker in string literal",
+      "params": {
+        "pattern": "\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\b",
+        "icase": true
+      }
+    },
+    "CEP-LINT-MAGIC-NUMBER": {
+      "check": "numeric_literal_policy",
+      "severity": 2,
+      "message": "magic number outside sanctioned form",
+      "params": {
+        "literal_pattern": "0[xX][0-9A-Fa-f_]+|\\b[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9]+)?\\b",
+        "allowed_values": [
+          "0",
+          "1"
+        ],
+        "exempt_contexts": [
+          "^\\s*(pub\\s+)?(const|static)\\b",
+          "\\benum\\b",
+          "^\\s*[A-Z][A-Za-z0-9_]*\\s*=",
+          "^\\s*#\\["
+        ]
+      }
+    },
+    "CEP-LINT-MACRO-PREFIX": {
+      "check": "macro_prefix_policy",
+      "severity": 2,
+      "message": "macro name violates prefix policy",
+      "params": {
+        "def_pattern": "macro_rules!\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "name_pattern": "^CEP_[A-Z0-9_]+$",
+        "guard_pattern": "^CEP_[A-Z0-9_]+$"
+      }
+    },
+    "CEP-LINT-HOT-BANNED": {
+      "check": "banned_token_policy",
+      "severity": 0,
+      "message": "banned token in hot-class file",
+      "params": {
+        "class_field": "CLASS",
+        "applies_to_classes": [
+          "CEP-0",
+          "HPC-0",
+          "RCS-0"
+        ],
+        "tokens": [
+          "\\bBox\\b",
+          "\\bVec\\b",
+          "\\bString\\b",
+          "\\bformat!\\b",
+          "\\bprintln!\\b",
+          "\\bprint!\\b",
+          "\\beprintln!\\b",
+          "\\beprint!\\b",
+          "\\bpanic!\\b",
+          "\\.unwrap\\(",
+          "\\.expect\\(",
+          "\\btodo!\\b",
+          "\\bunimplemented!\\b",
+          "\\bunreachable!\\b",
+          "\\bRc\\b",
+          "\\bArc\\b",
+          "\\bMutex\\b",
+          "\\bRwLock\\b",
+          "\\bdyn\\b",
+          "\\basync\\b",
+          "\\bawait\\b",
+          "\\bthread\\b",
+          "\\bstd\\b"
+        ]
+      }
+    },
+    "CEP-LINT-STUB-BODY": {
+      "check": "function_policy",
+      "mode": "stub_body",
+      "severity": 1,
+      "message": "empty function body without declared stub status",
+      "params": {
+        "fn_def_pattern": "^\\s*(?:pub(?:\\([a-z ]+\\))?\\s+)?(?:unsafe\\s+)?(?:extern\\s+\"[A-Za-z0-9]*\"\\s+)?(?:const\\s+)?(?:async\\s+)?fn\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "gap_pattern": "^\\s*(#\\[[A-Za-z_(=!].*|pub(\\([a-z ]+\\))?|unsafe|extern(\\s+\"[A-Za-z0-9]*\")?|const|async)$",
+        "suppress_status_field": "STATUS",
+        "suppress_statuses": [
+          "stub",
+          "partial",
+          "placeholder"
+        ]
+      }
+    },
+    "CEP-LINT-EMPTY-CATCH": {
+      "check": "flat_code_regex",
+      "severity": 1,
+      "message": "empty catch handler",
+      "params": {
+        "pattern": "\\bcatch\\s*\\([^)]*\\)\\s*\\{\\s*\\}"
+      }
+    },
+    "CEP-LINT-EMPTY-BRANCH": {
+      "check": "flat_code_regex",
+      "severity": 2,
+      "message": "empty control-flow branch",
+      "params": {
+        "pattern": "\\b(if|else|for|while|loop|match|try)\\b[^;{}]*\\{\\s*\\}"
+      }
+    },
+    "CEP-LINT-CONSTANT-RETURN": {
+      "check": "function_policy",
+      "mode": "constant_return",
+      "severity": 2,
+      "message": "constant return not computed from inputs",
+      "params": {
+        "fn_def_pattern": "^\\s*(?:pub(?:\\([a-z ]+\\))?\\s+)?(?:unsafe\\s+)?(?:extern\\s+\"[A-Za-z0-9]*\"\\s+)?(?:const\\s+)?(?:async\\s+)?fn\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "pattern": "^\\s*(return\\s+(true|false|None|nullptr)|true|false|None)\\s*;?\\s*$"
+      }
+    },
+    "CEP-LINT-NAMING-TYPE": {
+      "check": "flat_code_regex",
+      "severity": 2,
+      "message": "type name violates PascalCase",
+      "params": {
+        "pattern": "\\b(struct|enum|union|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "name_group": 2,
+        "name_pattern": "^[A-Z][A-Za-z0-9]*$"
+      }
+    },
+    "CEP-LINT-NAMING-FUNC": {
+      "check": "function_policy",
+      "mode": "naming",
+      "severity": 2,
+      "message": "function name violates snake_case",
+      "params": {
+        "fn_def_pattern": "^\\s*(?:pub(?:\\([a-z ]+\\))?\\s+)?(?:unsafe\\s+)?(?:extern\\s+\"[A-Za-z0-9]*\"\\s+)?(?:const\\s+)?(?:async\\s+)?fn\\s+([A-Za-z_][A-Za-z0-9_]*)",
+        "name_pattern": "^[a-z_][a-z0-9_]*$"
+      }
+    },
+    "CEP-LINT-COMMENTED-CODE": {
+      "check": "comment_regex",
+      "severity": 2,
+      "message": "commented-out code",
+      "params": {
+        "pattern": "^(if|for|while|return|let|fn|pub)\\b[^:]*[;{]\\s*$|^\\s*[A-Za-z_][A-Za-z0-9_.]*\\([^;]*;\\s*$|^\\s*[A-Za-z_][A-Za-z0-9_.\\[\\]]*\\s*=[^=].*;\\s*$"
+      }
+    },
+    "CEP-LINT-ATOMIC-FILE": {
+      "check": "file_topology_policy",
+      "severity": 1,
+      "message": "atomic file topology violation",
+      "params": {
+        "class_limits": [
+          "CEP-0=400",
+          "HPC-0=400",
+          "RCS-0=400",
+          "CEP-1=800",
+          "HPC-1=800",
+          "RCS-1=800",
+          "CEP-2=1200",
+          "HPC-2=1200",
+          "RCS-2=1200",
+          "CC=800",
+          "FFI=800"
+        ],
+        "junk_pattern": "(util|helper|misc|common)",
+        "junk_icase": true,
+        "pass_dir_pattern": "passes/",
+        "pass_entry_pattern": "^pub fn run_"
+      }
+    },
+    "CEP-LINT-DOC-SYNC": {
+      "check": "doc_rule_coverage",
+      "severity": 1,
+      "message": "document and configuration drift",
+      "params": {
+        "doc_path": "standard.md",
+        "heading_pattern": "^### (?:[0-9]+\\.[0-9]+\\.[0-9]+ )?(?:Rule |`cep_lint` Rule: )([A-Z][A-Z0-9-]+)$",
+        "version_pattern": "^Version: \\*\\*([0-9]+\\.[0-9]+)\\*\\*\\s*$"
+      }
+    }
+  }
+}

@@ -49,6 +49,10 @@ pub const M_LOAD_ARR: u16 = 20;
 /// Store a vreg payload into one array cell.
 pub const M_STORE_ARR: u16 = 21;
 /// Math builtin call (imm = fnid).
+/// Math builtin call, fully slot-mediated: imm = helper fnid, src0 = argument
+/// slot, aux = result slot. The machine reads [state + arg payload], calls the
+/// helper, and writes [state + result payload]; no vreg crosses the call, so
+/// caller-clobbered registers cannot corrupt live values.
 pub const M_CALLM: u16 = 22;
 /// Bump-allocate one table into a GPR vreg (imm = length; prologue checked).
 pub const M_NEW_TABLE: u16 = 23;
@@ -81,8 +85,15 @@ pub const M_GUARD_FLAG: u16 = 39;
 pub const M_LOOP_BACK: u16 = 40;
 /// Inline allocation preflight before the loop body (imm = total bytes).
 pub const M_ALLOC_CHECK: u16 = 41;
+/// Loads a double from a frame slot's payload into an xmm vreg (imm = slot).
+pub const M_LOAD_SLOT_F: u16 = 42;
+/// Stores an xmm vreg into a frame slot's payload (imm = slot).
+pub const M_STORE_SLOT_F: u16 = 43;
 
 /// Guard kinds for M_GUARD imm.
+/// Guard kind: integer add/sub/mul overflowed and must deoptimize.
+pub const GUARD_KIND_OFLOW: i32 = 3;
+
 pub const GUARD_KIND_INT: i32 = 1;
 /// Guard kind: double.
 pub const GUARD_KIND_NUM: i32 = 2;

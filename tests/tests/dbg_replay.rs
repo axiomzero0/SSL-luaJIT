@@ -4,7 +4,7 @@
 // CEP:CLASS: CEP-1
 // CEP:STATUS: complete
 // CEP:FAILURE: Panics through assert_eq when a probe is unreachable, a probe return id mismatches, or the natural exit id changes; the SIGSEGV handler converts memory faults into process exit 9 so a faulting probe surfaces as a test abort with a printed fault address.
-// CEP:ASSUMES: tests/fixtures/hot.ssl compiles to exactly one root trace; the prologue is six instructions (three pushes, state pointer, heap base, allocation start) so instruction 6 is the header reset at byte 22; the replay state mirrors Driver::new at trace entry with integer slots 0, 1, 3.
+// CEP:ASSUMES: tests/fixtures/hot.ssl compiles to exactly one root trace; the prologue is eight instructions (five pushes: rbx, r13, r14, r15, r12, then state pointer, heap base, allocation start) so instruction 8 is the header reset at byte 26; the replay state mirrors Driver::new at trace entry with integer slots 0, 1, 3.
 // CEP:COST: cold; one driver run for artifact regeneration plus one trace execution per probe.
 // CEP:EVIDENCE: SSL_DEBUG=1 build/debug/ssljit tests/fixtures/hot.ssl dumps the same sealed region to /tmp/ssl_code.bin; probe offsets come from the committed disassembler over those bytes.
 // CEP:SECURITY: executes only bytes emitted by this repository's compiler from the checked-in fixture; no external input reaches the executable region.
@@ -23,16 +23,20 @@ const FIXTURE: &str = include_str!("../fixtures/hot.ssl");
 const ARTIFACT_PATH: &str = "/tmp/ssl_code.bin";
 /// Exit id carried by an injected probe return (`mov eax, 77`).
 const PROBE_EXIT_ID: u32 = 77;
-/// Probe sequence for post-prologue cuts: sets eax, undoes the three prologue
-/// pushes (`lea rsp, [rsp+24]`), and returns to the caller with a balanced stack.
-const PROBE_BODY_UNWIND: [u8; 11] = [0xB8, 77, 0, 0, 0, 0x48, 0x8D, 0x64, 0x24, 0x18, 0xC3];
+/// Probe sequence for post-prologue cuts: sets eax, undoes the four prologue
+/// pushes (`lea rsp, [rsp+32]`), and returns to the caller with a balanced stack.
+const PROBE_BODY_UNWIND: [u8; 11] = [0xB8, 77, 0, 0, 0, 0x48, 0x8D, 0x64, 0x24, 0x28, 0xC3];
 /// Probe sequence for the prologue start, where nothing has been pushed yet.
 const PROBE_TOP: [u8; 6] = [0xB8, 77, 0, 0, 0, 0xC3];
 /// Measured natural exit id of the fixture trace: EXIT_GUARD_BASE (1) plus the
-/// loop-exit branch guard (5). Changes whenever the fixture or pipeline changes.
-const NATURAL_EXIT_ID: u32 = 6;
-/// Instruction count of the standard prologue (no r12, odd push count).
-const PROLOGUE_INSNS: usize = 6;
+/// loop-exit branch guard (21). Changes whenever the fixture or pipeline changes;
+/// update deliberately. Moved 19 -> 21 across the 2026-11 fixes: own-header-only
+/// trace closing, slot-carrying type guards, loop-header profile votes, the
+/// value-carrying const pool, and the imul REX correction reshaped the IR.
+const NATURAL_EXIT_ID: u32 = 22;
+/// Instruction count of the standard prologue (no r12; four pushes, state
+/// pointer, heap base, allocation start, cursor init).
+const PROLOGUE_INSNS: usize = 8;
 /// Number of hot-path instruction boundaries probed after the header.
 const PROBE_COUNT: usize = 6;
 
@@ -43,9 +47,9 @@ extern "C" {
 #[repr(C)]
 struct SigAction {
     handler: usize,
-    mask: [u64; 16],
-    flags: i32,
+    flags: usize,
     restorer: usize,
+    mask: [u64; 16],
 }
 
 extern "C" {
@@ -77,7 +81,10 @@ fn install_handler() {
         restorer: 0,
     };
     let rc = unsafe { sigaction(11, &act, std::ptr::null_mut()) };
-    let msg = format!("sigaction rc={}\n", rc);
+    // SIGBUS on the same paths: misaligned or out-of-bounds machine-code
+    // access reports through signal 7 with the same context layout.
+    let rc_bus = unsafe { sigaction(7, &act, std::ptr::null_mut()) };
+    let msg = format!("sigaction rc={} bus={}\n", rc, rc_bus);
     unsafe {
         write(2, msg.as_ptr() as *const c_void, msg.len());
     }
@@ -106,7 +113,7 @@ fn ensure_code_bytes() -> Vec<u8> {
 // CEP:WHY: Hard-coded byte offsets would violate Law 7 and silently rot with any emission change; boundaries derived from the decoder track the fixture deterministically.
 // CEP:STATUS: complete
 // CEP:FAILURE: Panics when the fixture trace disassembles too small or when the prologue shape changes so the header no longer sits at byte 22.
-// CEP:ASSUMES: the standard prologue is six instructions (three pushes, state pointer, heap base, allocation start) and instruction 6 is the header reset; the first PROBE_COUNT body instructions are always on the hot path.
+// CEP:ASSUMES: the standard prologue is eight instructions (five pushes: rbx, r13, r14, r15, r12, then state pointer, heap base, allocation start) and instruction 8 is the header reset; the first PROBE_COUNT body instructions are always on the hot path.
 // CEP:COST: cold; one bounded disassembly pass.
 // CEP:EVIDENCE: SSL_DEBUG=1 ssljit fixture dump disassembles to the same boundaries.
 fn probe_offsets(bytes: &[u8]) -> Vec<usize> {
@@ -118,8 +125,8 @@ fn probe_offsets(bytes: &[u8]) -> Vec<usize> {
         count
     );
     assert_eq!(
-        lines[PROLOGUE_INSNS].offset, 22,
-        "unexpected prologue shape; the header must sit at byte 22"
+        lines[PROLOGUE_INSNS].offset, 26,
+        "unexpected prologue shape; the header must sit at byte 26"
     );
     let mut cuts = Vec::with_capacity(PROBE_COUNT + 1);
     cuts.push(0usize);
@@ -130,7 +137,7 @@ fn probe_offsets(bytes: &[u8]) -> Vec<usize> {
 }
 
 // CEP:WHAT: Copies the region into fresh executable memory, optionally overwrites the cut offset with a balanced probe return sequence, and runs the region once with the synthetic state.
-// CEP:WHY: Probes prove execution reachability of a boundary; post-prologue probes must unwind the three prologue pushes so the return is balanced, while the prologue-start probe runs before any push.
+// CEP:WHY: Probes prove execution reachability of a boundary; post-prologue probes must unwind the five prologue pushes so the return is balanced, while the prologue-start probe runs before any push.
 // CEP:STATUS: complete
 // CEP:FAILURE: Panics when the region fails to map, seal, or resolve an entry; a faulting probe triggers the SIGSEGV handler which exits 9.
 // CEP:ASSUMES: the replay state mirrors Driver::new at trace entry with integer slots 0, 1, 3; usize::MAX means no probe.
@@ -140,7 +147,7 @@ fn run_region(bytes: &[u8], cut: usize) -> u32 {
     let mut code = CodeMemory::new(bytes.len() + 64).expect("map");
     {
         let stage = code.stage();
-        stage[..bytes.len()].copy_from_slice(bytes);
+        stage[..bytes.len()].copy_from_slice(&bytes);
         if cut != usize::MAX {
             let probe: &[u8] = if cut == 0 { &PROBE_TOP } else { &PROBE_BODY_UNWIND };
             stage[cut..cut + probe.len()].copy_from_slice(probe);

@@ -80,7 +80,7 @@ impl MachineFunction {
     }
 
     pub fn alloc_label(&mut self) -> Option<u16> {
-        if self.next_label >= NO_LABEL {
+        if self.next_label == NO_LABEL {
             return None;
         }
         let label = self.next_label;

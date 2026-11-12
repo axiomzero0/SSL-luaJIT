@@ -227,20 +227,18 @@ fn emit_prologue(
     allocation: &Allocation,
     encoder: &mut Encoder,
 ) -> Result<(), EmitError> {
-    push_raw(encoder, 0x53)?;
-    push_raw2(encoder, 0x41, 0x55)?;
-    push_raw2(encoder, 0x41, 0x56)?;
-    let mut pushes = 3u8;
+    // SysV callee-saved set used by the machine body: rbx, r13, r14, r15, and
+    // r12 when the allocator needed it. Every one of them is clobbered by the
+    // body (rbx = state, r15 = heap base, r13/r14 = allocation cursors), so all
+    // of them must be preserved across the trace call.
+    push_raw(encoder, 0x53)?;           // push rbx
+    push_raw2(encoder, 0x41, 0x55)?;    // push r13
+    push_raw2(encoder, 0x41, 0x56)?;    // push r14
+    push_raw2(encoder, 0x41, 0x57)?;    // push r15
     if allocation.uses_r12() {
-        push_raw2(encoder, 0x41, 0x54)?;
-        pushes += 1;
+        push_raw2(encoder, 0x41, 0x54)?; // push r12
     }
     let _ = machine;
-    if pushes % 2 == 0 {
-        push_raw2(encoder, 0x48, 0x83)?;
-        push_raw(encoder, 0xEC)?;
-        push_raw(encoder, 0x08)?;
-    }
     mov_rr_raw(encoder, abi::STATE_PTR_GPR, abi::STATE_PTR_ARG_GPR)?;
     mov_slot_r_raw(encoder, abi::HEAP_BASE_GPR, layout::HEAP_BASE as i32)?;
     mov_slot_r_raw(encoder, abi::ALLOC_START_GPR, layout::BUMP_PTR as i32)?;
@@ -327,8 +325,12 @@ fn emit_insn(
                 .map_err(|_| EmitError::Overflow)
         }
         X_MOV_IR64 => {
+            // The packed constant value: imm = bits 0..31, src0 = 32..47,
+            // src1 = 48..63. No pool lookup; the value rides the instruction.
             let dst = phys(allocation, insn.dst);
-            let bits = const_bits(consts, insn.imm).ok_or(EmitError::BadHelper)?;
+            let bits = (insn.imm as u32 as u64)
+                | ((insn.src0 as u64) << 32)
+                | ((insn.src1 as u64) << 48);
             emit_mov_ir64(encoder, dst, bits)
         }
         X_MOV_RR => {
@@ -385,12 +387,25 @@ fn emit_insn(
             encoder.imul_rr(dst, src).map_err(|_| EmitError::Overflow)
         }
         X_ADD_IR => {
-            if insn.imm == 0 {
+            // The folded tile's imm is the raw addend value; skip a zero addend.
+            let value = insn.imm as i64;
+            if value == 0 {
                 return Ok(());
             }
-            encoder
-                .alu_ir(0, phys(allocation, insn.dst), insn.imm)
-                .map_err(|_| EmitError::Overflow)
+            let dst = phys(allocation, insn.dst);
+            if (-32_768i64..=32_767).contains(&value) {
+                encoder
+                    .alu_ir(0, dst, value as i32)
+                    .map_err(|_| EmitError::Overflow)
+            } else {
+                // Materialize the wide constant in the reserved scratch and add.
+                // The folded tile only carries i32 addends, so this branch is
+                // defensive; widen with the sign.
+                emit_mov_ir64(encoder, SCRATCH_EMIT_A, value as u64)?;
+                encoder
+                    .alu_rr(0, dst, SCRATCH_EMIT_A)
+                    .map_err(|_| EmitError::Overflow)
+            }
         }
         X_SHL_IR => encoder
             .shift_ir(0x4, phys(allocation, insn.dst), insn.imm)
@@ -466,6 +481,18 @@ fn emit_insn(
         X_UNPCKLPD | X_UNPCKHPD => encoder
             .unpckpd(insn.op == X_UNPCKHPD, phys(allocation, insn.dst), phys(allocation, insn.src1))
             .map_err(|_| EmitError::Overflow),
+        X_MOVSD_STATE_M2X => {
+            let dst = phys(allocation, insn.dst);
+            encoder
+                .movsd_state_m2x(dst, disp_for(insn.imm))
+                .map_err(|_| EmitError::Overflow)
+        }
+        X_MOVSD_STATE_X2M => {
+            let src = phys(allocation, insn.src0);
+            encoder
+                .movsd_state_x2m(src, disp_for(insn.imm))
+                .map_err(|_| EmitError::Overflow)
+        }
         X_MOVAPD_M2X | X_MOVSD_M2X => {
             let dst = phys(allocation, insn.dst);
             let prefix = if insn.op == X_MOVAPD_M2X { 0x66 } else { 0xF2 };
@@ -636,7 +663,10 @@ fn emit_stubs(
         if !labels.insert(crate::machine::helper_label(fnid as u16), encoder.len) {
             return Err(EmitError::Overflow);
         }
+        // movabs r10, address; jmp r10 (the REX.B prefix is required so the
+        // ModRM rm field 010 addresses r10 instead of rdx).
         emit_mov_ir64(encoder, SCRATCH_EMIT_A, address as u64)?;
+        encoder.push(0x41).map_err(|_| EmitError::Overflow)?;
         encoder.push(0xFF).map_err(|_| EmitError::Overflow)?;
         encoder.push(0xE2).map_err(|_| EmitError::Overflow)?;
     }
@@ -672,14 +702,14 @@ fn emit_snapshot_entry(
 
 /// Emits the register restore and return sequence mirroring the prologue.
 fn emit_epilogue(allocation: &Allocation, encoder: &mut Encoder) -> Result<(), EmitError> {
+    // Exact mirror of the prologue pushes in reverse order.
     if allocation.uses_r12() {
-        push_raw2(encoder, 0x48, 0x83)?;
-        push_raw(encoder, 0xC4)?;
-        push_raw(encoder, 0x08)?;
+        push_raw2(encoder, 0x41, 0x5C)?; // pop r12
     }
-    push_raw2(encoder, 0x41, 0x5E)?;
-    push_raw2(encoder, 0x41, 0x5D)?;
-    push_raw(encoder, 0x5B)?;
+    push_raw2(encoder, 0x41, 0x5F)?;    // pop r15
+    push_raw2(encoder, 0x41, 0x5E)?;    // pop r14
+    push_raw2(encoder, 0x41, 0x5D)?;    // pop r13
+    push_raw(encoder, 0x5B)?;           // pop rbx
     encoder.ret().map_err(|_| EmitError::Overflow)
 }
 

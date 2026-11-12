@@ -100,9 +100,10 @@ impl<'a> Encoder<'a> {
         self.push_modrm(3, src, dst)
     }
 
-    /// Encodes imul r64, r64 (0F AF).
+    /// Encodes imul r64, r64 (0F AF): dst = dst * src, with dst in the reg
+    /// field (REX.R) and src in the rm field (REX.B).
     pub fn imul_rr(&mut self, dst: u8, src: u8) -> Result<(), EncodeError> {
-        self.push_rex_w(src >= 8, dst >= 8)?;
+        self.push_rex_w(dst >= 8, src >= 8)?;
         self.push(0x0F)?;
         self.push(0xAF)?;
         self.push_modrm(3, dst, src)
@@ -142,7 +143,10 @@ impl<'a> Encoder<'a> {
 
     /// Encodes setcc r8 followed by movzx r64, r8.
     pub fn setcc(&mut self, cc: u8, dst: u8) -> Result<(), EncodeError> {
-        self.push_rex(dst >= 8, false, false)?;
+        // SETCC encodes its destination in the rm field (reg is the /0 opcode
+        // extension), so the high-bit flag must be REX.B, not REX.R; emitting
+        // REX.R silently writes the low byte of dst&7 instead (e.g. cl for r9).
+        self.push_rex(false, false, dst >= 8)?;
         self.push(0x0F)?;
         self.push(0x90 + cc)?;
         self.push_modrm(3, 0, dst)?;
@@ -150,6 +154,26 @@ impl<'a> Encoder<'a> {
         self.push(0x0F)?;
         self.push(0xB6)?;
         self.push_modrm(3, dst, dst)
+    }
+
+    /// Encodes movsd xmm, [rbx + disp32] (state slot payload load).
+    pub fn movsd_state_m2x(&mut self, xmm: u8, disp: i32) -> Result<(), EncodeError> {
+        self.push(0xF2)?;
+        self.push_rex(false, xmm >= 8, false)?;
+        self.push(0x0F)?;
+        self.push(0x10)?;
+        self.push_modrm(2, xmm, 3)?;
+        self.push_le32(disp as u32)
+    }
+
+    /// Encodes movsd [rbx + disp32], xmm (state slot payload store).
+    pub fn movsd_state_x2m(&mut self, xmm: u8, disp: i32) -> Result<(), EncodeError> {
+        self.push(0xF2)?;
+        self.push_rex(false, xmm >= 8, false)?;
+        self.push(0x0F)?;
+        self.push(0x11)?;
+        self.push_modrm(2, xmm, 3)?;
+        self.push_le32(disp as u32)
     }
 
     /// Encodes cvtsi2sd xmm, r64 (F2 0F 2A).

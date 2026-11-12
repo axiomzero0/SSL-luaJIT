@@ -54,6 +54,7 @@ fn op_name(op: u16) -> &'static str {
         OP_CONST_F => "const_f",
         OP_PARAM => "param",
         OP_PHI => "phi",
+        OP_COPY_S => "copy_s",
         OP_ADD_I => "add_i",
         OP_SUB_I => "sub_i",
         OP_MUL_I => "mul_i",

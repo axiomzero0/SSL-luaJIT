@@ -79,10 +79,16 @@ pub struct Driver {
     scratch_worklist: Vec<u32>,
     scratch_remap: Vec<(u32, u32)>,
     roots: Vec<RootTrace>,
-    steps: u64,
     traces_compiled: u32,
     side_traces: u32,
     guards_merged: u32,
+    /// Whether installed traces execute as machine code. False gives the
+    /// interpreter-only path (tests and differential runs) without the
+    /// process-global SSL_NOEXEC environment variable, which raced under the
+    /// parallel test harness.
+    machine_exec: bool,
+    /// Set when the program ran to completion; false after BudgetSpent.
+    completed: bool,
 }
 
 /// Internally assembled program view.
@@ -101,6 +107,30 @@ impl Driver {
             }
         }
         let assembled = ssl_cold_intern_stage(text)?;
+        Driver::from_assembled(assembled)
+    }
+
+    /// Creates a driver from Lua source through the Lua frontend with interned strings.
+    pub fn from_lua(source: &str) -> Result<Driver, DriverError> {
+        let compiled = crate::lua_frontend::compile_source(source).map_err(lua_error)?;
+        let assembled = crate::lua_frontend::to_assembled(&compiled).map_err(lua_error)?;
+        if std::env::var("SSL_DEBUG").is_ok() {
+            eprintln!("DBG lua words={:?}", assembled.words);
+            eprintln!("DBG lua consts={:?}", assembled.consts);
+            eprintln!("DBG lua slot_count={} globals={:?}", assembled.slot_count, assembled.global_names);
+        }
+        if assembled.words.len() > L::MAX_PROGRAM_WORDS as usize {
+            return Err(DriverError::Validate("program too large".to_string()));
+        }
+        Driver::from_assembled(Assembled {
+            words: assembled.words,
+            consts: assembled.consts,
+            slot_count: assembled.slot_count,
+        })
+    }
+
+    /// Shared machine initialization for every constructor path.
+    fn from_assembled(assembled: Assembled) -> Result<Driver, DriverError> {
         let heap_len = gc::arena_bytes() as usize;
         let heap = vec![0u8; heap_len];
         let mut state = Box::new(VmState::new());
@@ -108,6 +138,14 @@ impl Driver {
         state.eden_end = ssl_hot::heap::survivor_base();
         state.barrier_capacity = L::BARRIER_BYTES / 4;
         state.barrier_base = ssl_hot::gc::barrier_base();
+        // The machine prologue loads the full 64-bit arena pointer from the
+        // heap_base/trace_table field pair at layout::HEAP_BASE (one u64 read
+        // across both u32 fields); the interpreter instead receives the arena
+        // as a separate slice. The Vec is preallocated once and never resized,
+        // so the pointer stays valid for the whole run.
+        let heap_addr = heap.as_ptr() as u64;
+        state.heap_base = heap_addr as u32;
+        state.trace_table = (heap_addr >> 32) as u32;
         Ok(Driver {
             program: assembled,
             state,
@@ -116,15 +154,22 @@ impl Driver {
             scratch_worklist: vec![0u32; L::MAX_TABLES as usize],
             scratch_remap: vec![(0, 0); L::MAX_TABLES as usize],
             roots: Vec::new(),
-            steps: 0,
             traces_compiled: 0,
             side_traces: 0,
             guards_merged: 0,
+            machine_exec: std::env::var("SSL_NOEXEC").is_err(),
+            completed: false,
         })
+    }
+
+    /// Selects whether installed traces run as machine code (default true).
+    pub fn set_machine_exec(&mut self, enabled: bool) {
+        self.machine_exec = enabled;
     }
 
     /// Runs the program to completion with the JIT enabled.
     pub fn run(&mut self) -> Result<RunReport, DriverError> {
+        self.completed = false;
         loop {
             let outcome = {
                 let view = Program {
@@ -137,15 +182,38 @@ impl Driver {
                     remap: &mut self.scratch_remap,
                 };
                 run_until_event(&mut self.state, &view, &mut self.heap, &mut self.rt, &mut scratch)
-                    .map_err(|e| DriverError::Run(format!("{:?}", e)))?
+                    .map_err(|e| {
+                        if std::env::var("SSL_DEBUG").is_ok() {
+                            eprintln!(
+                                "DBG run err={:?} pc={} slot3={:?} slot4={:?} slot6={:?}",
+                                e,
+                                self.state.pc,
+                                self.state.slot(3),
+                                self.state.slot(4),
+                                self.state.slot(6)
+                            );
+                        }
+                        DriverError::Run(format!("{:?}", e))
+                    })?
             };
 
             if std::env::var("SSL_DEBUG").is_ok() {
-                eprintln!("DBG outcome={:?} pc={} slot1={:?}", outcome, self.state.pc,
-                    self.state.slot(1).map(|v| v.as_int()));
+                eprintln!(
+                    "DBG outcome={:?} pc={} iv(slot1)={:?} s(slot2)={:?}",
+                    outcome,
+                    self.state.pc,
+                    self.state.slot(1).map(|v| v.as_int()),
+                    self.state.slot(2).map(|v| v.as_int())
+                );
             }
             match outcome {
-                RunOutcome::Returned => break,
+                RunOutcome::Returned => {
+                    self.completed = true;
+                    break;
+                }
+                // The step budget is a hard run bound, not silent success: the
+                // report carries completed=false so callers can reject partial
+                // executions instead of publishing truncated results.
                 RunOutcome::BudgetSpent => break,
                 RunOutcome::HotLoop(header) => {
                     self.compile_root(header)?;
@@ -172,7 +240,7 @@ impl Driver {
             None => return Ok(()),
         };
         loop {
-            if std::env::var("SSL_NOEXEC").is_ok() {
+            if !self.machine_exec {
                 return Ok(());
             }
             let entry = self.roots[root_index].entry_offset;
@@ -183,7 +251,14 @@ impl Driver {
             .map_err(|e| DriverError::Memory(format!("{:?}", e)))?;
             let state_ptr: *mut VmState = &mut *self.state;
             if std::env::var("SSL_DEBUG").is_ok() {
-                eprintln!("DBG entering trace entry={} state={:?}", entry, state_ptr as usize);
+                eprintln!(
+                    "DBG entering trace entry={} state={:p} heap_ptr={:p} heap_fields=({:#x},{:#x})",
+                    entry,
+                    state_ptr,
+                    self.heap.as_ptr(),
+                    self.state.heap_base,
+                    self.state.trace_table
+                );
             }
             let exit_id = unsafe { call_trace(entry_fn, state_ptr) };
             if std::env::var("SSL_DEBUG").is_ok() {
@@ -220,10 +295,17 @@ impl Driver {
                         let resume_pc = pc;
                         self.compile_side(root_index, guard, resume_pc)?;
                     }
+                    return Ok(());
                 }
-                return Ok(());
+                // A guard exit without a snapshot cannot be resumed: re-entering
+                // the same trace would loop forever on the same failing guard.
+                return Err(DriverError::Compile(format!(
+                    "guard {} exited without a resume snapshot (exit_id={})",
+                    guard, exit_id
+                )));
             }
-            return Ok(());
+            // Unknown exit protocol value: fail loudly instead of spinning.
+            return Err(DriverError::Compile(format!("unknown trace exit_id={}", exit_id)));
         }
     }
 
@@ -237,6 +319,8 @@ impl Driver {
             traces_compiled,
             ..
         } = self;
+        // Every failure path below blacklists the header so hot detection stops
+        // re-attempting compilation on every interpreter iteration.
         if roots.iter().any(|root| root.header_pc == header) {
             return Ok(());
         }
@@ -262,7 +346,7 @@ impl Driver {
                 return Ok(());
             }
         };
-        let built = match ir_build::build_trace(&buffer) {
+        let built = match ir_build::build_trace(&buffer, &program.consts) {
             Ok(built) => built,
             Err(err) => {
                 if std::env::var("SSL_DEBUG").is_ok() {
@@ -319,12 +403,14 @@ impl Driver {
         let mut machine = MachineFunction::new(&body);
         if let Err(err) = select_instructions(&body, &mut machine) {
             debug_fail(format!("isel {:?}", err));
+            rt.traces.mark_uncompilable(header);
             return Ok(());
         }
         let allocation = match allocate(&machine, &body) {
             Ok(allocation) => allocation,
             Err(err) => {
                 debug_fail(format!("regalloc {:?}", err));
+                rt.traces.mark_uncompilable(header);
                 return Ok(());
             }
         };
@@ -334,6 +420,7 @@ impl Driver {
                 if std::env::var("SSL_DEBUG").is_ok() {
                     eprintln!("DBG emit err={:?}", err);
                 }
+                rt.traces.mark_uncompilable(header);
                 return Ok(());
             }
         };
@@ -342,7 +429,13 @@ impl Driver {
         }
         let guard_count = body.snapshot_count;
         if std::env::var("SSL_DEBUG").is_ok() {
-            eprintln!("DBG root installed header={} guards={}", header, guard_count);
+            eprintln!(
+                "DBG root installed header={} guards={} region_base={:p} region_len={}",
+                header,
+                guard_count,
+                emitted.code.base(),
+                emitted.code.used_bytes()
+            );
         }
         rt.traces.install(header);
         *traces_compiled += 1;
@@ -386,7 +479,7 @@ impl Driver {
             Ok(buffer) => buffer,
             Err(_) => return Ok(()),
         };
-        let built = match ir_build::build_trace(&buffer) {
+        let built = match ir_build::build_trace(&buffer, &program.consts) {
             Ok(built) => built,
             Err(err) => {
                 if std::env::var("SSL_DEBUG").is_ok() {
@@ -453,6 +546,7 @@ impl Driver {
             Ok(allocation) => allocation,
             Err(err) => {
                 debug_fail(format!("regalloc {:?}", err));
+                rt.traces.mark_uncompilable(header);
                 return Ok(());
             }
         };
@@ -462,6 +556,7 @@ impl Driver {
                 if std::env::var("SSL_DEBUG").is_ok() {
                     eprintln!("DBG emit err={:?}", err);
                 }
+                rt.traces.mark_uncompilable(header);
                 return Ok(());
             }
         };
@@ -478,13 +573,14 @@ impl Driver {
 
     fn report(&self) -> RunReport {
         RunReport {
-            steps: self.steps,
+            steps: self.rt.executed_steps,
             traces_compiled: self.traces_compiled,
             side_traces: self.side_traces,
             guards_merged: self.guards_merged,
             minor_gcs: self.rt.gc.minor_count,
             major_gcs: self.rt.gc.major_count,
             out: self.rt.out[..self.rt.out_len as usize].to_vec(),
+            completed: self.completed,
         }
     }
 }
@@ -600,7 +696,7 @@ fn optimize_trace(
 
 /// Run summary returned to the CLI and tests.
 pub struct RunReport {
-    /// Interpreted step count.
+    /// Interpreted step count (machine-code iterations are not counted).
     pub steps: u64,
     /// Root traces compiled.
     pub traces_compiled: u32,
@@ -614,6 +710,13 @@ pub struct RunReport {
     pub major_gcs: u32,
     /// Printed output values in order.
     pub out: Vec<ssl_hot::vm_value::SslValue>,
+    /// True when the program ran to completion; false after BudgetSpent.
+    pub completed: bool,
+}
+
+/// Formats one frontend error for the driver airlock.
+fn lua_error(err: crate::lua_ast::FrontendError) -> DriverError {
+    DriverError::Assemble(format!("lua:{}: {}", err.line, err.message))
 }
 
 /// Interning stage separated to keep borrow chains simple.
@@ -646,7 +749,7 @@ fn dump_code(code: &CodeMemory, labels: &ssl_target_x86_64::emit::LabelTable, en
         let (label, offset) = labels.debug_entries()[idx];
         eprintln!("DBG label {} -> {}", label, offset);
     }
-    let mut lines: [ssl_target_x86_64::disasm::Line; 64] = unsafe { std::mem::zeroed() };
+    let mut lines: [ssl_target_x86_64::disasm::Line; 256] = unsafe { std::mem::zeroed() };
     let count = ssl_target_x86_64::disasm::disassemble(&bytes[entry..], &mut lines);
     eprintln!("DBG code bytes={} entry={}", bytes.len(), entry);
     for idx in 0..labels.debug_count() {

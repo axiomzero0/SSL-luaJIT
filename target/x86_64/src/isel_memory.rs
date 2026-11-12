@@ -29,6 +29,18 @@ pub fn lower_memory(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
         ssl_hot::mir::M_STORE_G_SLOT => lower_store_global(mir, machine),
         ssl_hot::mir::M_NEW_TABLE => lower_new_table(mir, machine),
         ssl_hot::mir::M_ALLOC_CHECK => lower_alloc_check(mir, machine),
+        ssl_hot::mir::M_LOAD_SLOT_F => {
+            let mut load = MachineInsn::new(X_MOVSD_STATE_M2X);
+            load.dst = mir.dst;
+            load.imm = slot_payload_disp(mir.imm);
+            machine.push(load)
+        }
+        ssl_hot::mir::M_STORE_SLOT_F => {
+            let mut store = MachineInsn::new(X_MOVSD_STATE_X2M);
+            store.src0 = mir.src0;
+            store.imm = slot_payload_disp(mir.imm);
+            machine.push(store)
+        }
         _ => false,
     }
 }
@@ -75,28 +87,32 @@ fn lower_store_slot(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
 
 fn lower_load_arr_slot(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
     let scratch = cell_address(mir.src0, mir.src1, machine);
+    // The loaded values land in scratch2, NOT in the address register: the
+    // first load clobbering scratch (its own index register) made the second
+    // load read the object header instead of the cell payload.
+    let value = machine.scratch_gpr2();
     let mut tag = MachineInsn::new(X_LOAD_IDX);
-    tag.dst = scratch;
+    tag.dst = value;
     tag.src1 = scratch;
     tag.imm = hlayout::HEADER_BYTES as i32;
     if !machine.push(tag) {
         return false;
     }
     let mut store_tag = MachineInsn::new(X_MOV_R_SLOT);
-    store_tag.src0 = scratch;
+    store_tag.src0 = value;
     store_tag.imm = slot_tag_disp(mir.imm);
     if !machine.push(store_tag) {
         return false;
     }
     let mut payload = MachineInsn::new(X_LOAD_IDX);
-    payload.dst = scratch;
+    payload.dst = value;
     payload.src1 = scratch;
     payload.imm = hlayout::HEADER_BYTES as i32 + 8;
     if !machine.push(payload) {
         return false;
     }
     let mut store_payload = MachineInsn::new(X_MOV_R_SLOT);
-    store_payload.src0 = scratch;
+    store_payload.src0 = value;
     store_payload.imm = slot_payload_disp(mir.imm);
     machine.push(store_payload)
 }
@@ -119,7 +135,9 @@ fn lower_store_arr_slot(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
     if mir.imm < 0 {
         return false;
     }
-    let scratch_gpr = machine.scratch_gpr();
+    // The value temp must not be the address register (scratch): the slot
+    // loads would destroy the heap address before the cell stores use it.
+    let scratch_gpr = machine.scratch_gpr2();
     let mut tag = MachineInsn::new(X_MOV_SLOT_R);
     tag.dst = scratch_gpr;
     tag.imm = slot_tag_disp(mir.imm);
@@ -173,6 +191,29 @@ fn lower_load_global(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
 }
 
 fn lower_store_global(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
+    // Two conventions:
+    //   src0 != 0: store from a vreg payload with a static tag (imm = global id,
+    //              aux = value kind);
+    //   src0 == 0: legacy slot-to-slot copy (imm = source slot, aux = global id).
+    if mir.src0 != 0 {
+        let scratch = machine.scratch_gpr();
+        let mut tag = MachineInsn::new(X_MOV_IR);
+        tag.dst = scratch;
+        tag.imm = kind_tag(mir.aux as u8) as i32;
+        if !machine.push(tag) {
+            return false;
+        }
+        let mut store_tag = MachineInsn::new(X_MOV_R_SLOT);
+        store_tag.src0 = scratch;
+        store_tag.imm = global_tag_disp(mir.imm);
+        if !machine.push(store_tag) {
+            return false;
+        }
+        let mut payload = MachineInsn::new(X_MOV_R_SLOT);
+        payload.src0 = mir.src0;
+        payload.imm = global_payload_disp(mir.imm);
+        return machine.push(payload);
+    }
     let scratch = machine.scratch_gpr();
     let mut tag = MachineInsn::new(X_MOV_SLOT_R);
     tag.dst = scratch;
@@ -318,7 +359,11 @@ pub fn cell_address(table: u16, index: u16, machine: &mut MachineFunction) -> u1
     }
     let mut combine = MachineInsn::new(X_ADD_RR);
     combine.dst = scratch;
-    combine.src0 = scratch2;
+    combine.src0 = scratch;
+    // src1 carries the addend (X_ADD_RR computes dst = src0 + src1); leaving
+    // it at the zero-initialized vreg id made the heap address depend on an
+    // unrelated live value instead of the scaled index.
+    combine.src1 = scratch2;
     let _ = machine.push(combine);
     scratch
 }
@@ -337,6 +382,7 @@ pub const fn kind_tag(kind: u8) -> u64 {
         kinds::KIND_NUM => TAG_NUM,
         kinds::KIND_BOOL => TAG_BOOL,
         kinds::KIND_STR => TAG_STR,
+        kinds::KIND_NIL => 0,
         _ => TAG_TBL,
     }
 }

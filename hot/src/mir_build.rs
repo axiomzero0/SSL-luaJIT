@@ -59,34 +59,10 @@ pub fn build_mir(
             lower_node(trace, idx, &mut body, &mut state)?;
         }
     }
-    for copy in state.phi_copies.iter() {
-        if copy.phi != 0 && copy.src != 0 {
-            let insn = MirInsn {
-                op: if copy.vector { M_MOV_F } else { M_MOV_I },
-                dst: copy.phi,
-                src0: copy.src,
-                src1: 0,
-                imm: 0,
-                aux: 0,
-            };
-            body.push(insn).ok_or(MirError::InsnCapacity)?;
-        }
-    }
-    for store in state.phi_stores.iter() {
-        if store.slot < L::MAX_SLOTS as usize && store.vreg != 0 {
-            let tag = kind_tag_of(store.kind);
-            body.push(MirInsn {
-                op: M_STORE_SLOT,
-                dst: 0,
-                src0: store.vreg,
-                src1: 0,
-                imm: store.slot as i32,
-                aux: store.kind as u16,
-            })
-            .ok_or(MirError::InsnCapacity)?;
-            let _ = tag;
-        }
-    }
+    // Loop-carried values flow through frame slots: the body reads the slot via
+    // its guard load, and finalize_phis stores each phi's backedge value back to
+    // the slot so the next internal iteration (and deopt) observes it.
+    finalize_phis(trace, &mut body, &mut state)?;
     let back = MirInsn {
         op: M_LOOP_BACK,
         dst: 0,
@@ -99,6 +75,52 @@ pub fn build_mir(
     Ok(body)
 }
 
+/// Emits one backedge slot store per loop-carried phi, carrying the
+/// end-of-iteration value back to the interpreter slot.
+fn finalize_phis(
+    trace: &IrTrace,
+    body: &mut MirBody,
+    state: &mut LoweringState,
+) -> Result<(), MirError> {
+    for idx in 0..state.phi_node_count as usize {
+        let node = state.phi_nodes[idx] as usize;
+        let slot = match state.slot_of(node) {
+            Some(slot) => slot,
+            None => continue,
+        };
+        let backedge = trace.in1[node];
+        if backedge == NO_OPERAND {
+            continue;
+        }
+        let src = operand_vreg(trace, backedge, state);
+        if src == 0 {
+            continue;
+        }
+        // Slot-copy nodes carry their recorded static kind in imm (they are
+        // TY_ANY); every other producer's kind follows its IR type.
+        let kind = if trace.op[backedge as usize] == OP_COPY_S {
+            let k = trace.imm[backedge as usize] as u8;
+            if k == KIND_NIL { KIND_INT } else { k }
+        } else {
+            match trace.ty[backedge as usize] {
+                TY_BOOL => KIND_BOOL,
+                TY_NUM => KIND_NUM,
+                _ => KIND_INT,
+            }
+        };
+        body.push(MirInsn {
+            op: M_STORE_SLOT,
+            dst: 0,
+            src0: src,
+            src1: 0,
+            imm: slot as i32,
+            aux: kind as u16,
+        })
+        .ok_or(MirError::InsnCapacity)?;
+    }
+    Ok(())
+}
+
 /// Mutable lowering state shared across node lowering.
 struct LoweringState<'a> {
     vregs: [u16; L::MAX_IR_NODES as usize],
@@ -107,27 +129,9 @@ struct LoweringState<'a> {
     slot_vreg: [u16; L::MAX_SLOTS as usize],
     slot_kind: [u8; L::MAX_SLOTS as usize],
     slot_valid: [bool; L::MAX_SLOTS as usize],
-    phi_copies: [PhiCopy; L::MAX_SLOTS as usize],
-    phi_copy_count: usize,
-    phi_stores: [PhiStore; L::MAX_SLOTS as usize],
-    phi_store_count: usize,
+    phi_nodes: [u16; L::MAX_SLOTS as usize],
+    phi_node_count: usize,
     reductions: &'a [ReductionExit],
-}
-
-/// One slot write-back at the backedge carrying the phi value.
-#[derive(Copy, Clone)]
-struct PhiStore {
-    slot: usize,
-    vreg: u16,
-    kind: u8,
-}
-
-/// One phi merge copy emitted at the backedge.
-#[derive(Copy, Clone)]
-struct PhiCopy {
-    phi: u16,
-    src: u16,
-    vector: bool,
 }
 
 impl<'a> LoweringState<'a> {
@@ -143,24 +147,21 @@ impl<'a> LoweringState<'a> {
             slot_vreg: [0; L::MAX_SLOTS as usize],
             slot_kind: [KIND_NIL; L::MAX_SLOTS as usize],
             slot_valid: [false; L::MAX_SLOTS as usize],
-            phi_copies: [PhiCopy {
-                phi: 0,
-                src: 0,
-                vector: false,
-            }; L::MAX_SLOTS as usize],
-            phi_copy_count: 0,
-            phi_stores: [PhiStore {
-                slot: 0,
-                vreg: 0,
-                kind: 0,
-            }; L::MAX_SLOTS as usize],
-            phi_store_count: 0,
+            phi_nodes: [0; L::MAX_SLOTS as usize],
+            phi_node_count: 0,
             reductions,
         };
         for slot in 0..L::MAX_SLOTS as usize {
             let node = slot_nodes[slot];
             if node != NO_OPERAND && (node as usize) < L::MAX_IR_NODES as usize {
                 state.node_slot[node as usize] = slot as u16;
+            }
+        }
+        // Phi nodes carry their home slot in aux; the final env no longer points
+        // at them once body writes land, so map them explicitly for finalize_phis.
+        for idx in 0..(trace.count as usize).min(L::MAX_IR_NODES as usize) {
+            if trace.op[idx] == OP_PHI {
+                state.node_slot[idx] = trace.aux[idx];
             }
         }
         let _ = trace;
@@ -237,22 +238,7 @@ fn lower_node(
             state.node_vreg[idx] = true;
             Ok(())
         }
-        OP_CALLM => {
-            let src = operand_vreg(trace, trace.in0[idx], state);
-            let dst = body.new_vreg(VR_XMM, KIND_NUM).ok_or(MirError::VregCapacity)?;
-            body.push(MirInsn {
-                op: M_CALLM,
-                dst,
-                src0: src,
-                src1: 0,
-                imm: trace.imm[idx],
-                aux: 0,
-            })
-            .ok_or(MirError::InsnCapacity)?;
-            state.vregs[idx] = dst;
-            state.node_vreg[idx] = true;
-            Ok(())
-        }
+        OP_CALLM => lower_callm(trace, idx, body, state),
         OP_TNEW => {
             let handle = body.new_vreg(VR_GPR, KIND_TBL).ok_or(MirError::VregCapacity)?;
             body.push(MirInsn {
@@ -281,6 +267,14 @@ fn lower_node(
             })
             .ok_or(MirError::InsnCapacity)?;
             if let Some(slot) = state.slot_of(idx) {
+                // The value now lives in the slot's memory; record its kind so
+                // the slot-aware operand resolver loads it with the right
+                // register class (an int reloaded through the SSE path read
+                // zero and silently turned t[i] = t[i] + 1 into a no-op).
+                state.slot_kind[slot] = match trace.ty[idx] {
+                    crate::ir::TY_NUM => KIND_NUM,
+                    _ => KIND_INT,
+                };
                 state.slot_valid[slot] = false;
             }
             Ok(())
@@ -301,13 +295,16 @@ fn lower_node(
             Ok(())
         }
         OP_GLOAD => {
+            // imm = global id (node imm), aux = the destination slot the value
+            // lands in; the isel copies global[imm] into slot[aux] memory.
+            let dst_slot = state.slot_of(idx).unwrap_or(0) as i32;
             body.push(MirInsn {
                 op: M_LOAD_G_SLOT,
                 dst: 0,
                 src0: 0,
                 src1: 0,
                 imm: trace.imm[idx],
-                aux: trace.aux[idx],
+                aux: dst_slot as u16,
             })
             .ok_or(MirError::InsnCapacity)?;
             if let Some(slot) = state.slot_of(idx) {
@@ -316,16 +313,33 @@ fn lower_node(
             Ok(())
         }
         OP_GSTORE => {
-            let (source_slot, _) = value_source(trace, trace.in0[idx], state);
-            body.push(MirInsn {
-                op: M_STORE_G_SLOT,
-                dst: 0,
-                src0: 0,
-                src1: 0,
-                imm: source_slot as i32,
-                aux: trace.aux[idx],
-            })
-            .ok_or(MirError::InsnCapacity)?;
+            // When the value already lives in a vreg, store it directly with its
+            // recorded kind; src0 == 0 keeps the legacy slot-to-slot copy path.
+            let value_node = trace.in0[idx];
+            let src = operand_vreg(trace, value_node, state);
+            if src != 0 {
+                let kind = value_kind_of(trace, value_node);
+                body.push(MirInsn {
+                    op: M_STORE_G_SLOT,
+                    dst: 0,
+                    src0: src,
+                    src1: 0,
+                    imm: trace.aux[idx] as i32,
+                    aux: kind as u16,
+                })
+                .ok_or(MirError::InsnCapacity)?;
+            } else {
+                let (source_slot, _) = value_source(trace, value_node, state);
+                body.push(MirInsn {
+                    op: M_STORE_G_SLOT,
+                    dst: 0,
+                    src0: 0,
+                    src1: 0,
+                    imm: source_slot as i32,
+                    aux: trace.aux[idx],
+                })
+                .ok_or(MirError::InsnCapacity)?;
+            }
             Ok(())
         }
         OP_VLOAD_F => lower_vec_load(trace, idx, body, state),
@@ -333,9 +347,69 @@ fn lower_node(
         OP_VADD_F | OP_VSUB_F | OP_VMUL_F => lower_vec_arith(trace, idx, body, state),
         OP_VPACK => lower_vec_pack(trace, idx, body, state),
         OP_HADD_F => lower_hadd(trace, idx, body, state),
+        OP_COPY_S => lower_copy_s(trace, idx, body, state),
         OP_PHI => lower_phi(trace, idx, body, state),
         _ => Ok(()),
     }
+}
+
+/// Lowers one frame-slot copy: stores the source value's vreg payload into the
+/// destination slot's memory with the recorded static tag, and keeps the
+/// slot-to-vreg map consistent so later guards reuse the value directly.
+fn lower_copy_s(
+    trace: &IrTrace,
+    idx: usize,
+    body: &mut MirBody,
+    state: &mut LoweringState,
+) -> Result<(), MirError> {
+    let value_node = trace.in0[idx];
+    let slot = trace.aux[idx] as usize;
+    if slot >= L::MAX_SLOTS as usize {
+        return Ok(());
+    }
+    let kind = trace.imm[idx] as u8;
+    let mut src = operand_vreg(trace, value_node, state);
+    if src == 0 && value_node != NO_OPERAND {
+        // The value has no vreg yet (an unguarded param): load it from its home
+        // slot memory and register the vreg for later users.
+        let home = trace.aux[value_node as usize] as i32;
+        let vreg = body.new_vreg(VR_GPR, kind).ok_or(MirError::VregCapacity)?;
+        body.push(MirInsn {
+            op: M_LOAD_SLOT,
+            dst: vreg,
+            src0: 0,
+            src1: 0,
+            imm: home,
+            aux: kind as u16,
+        })
+        .ok_or(MirError::InsnCapacity)?;
+        state.vregs[value_node as usize] = vreg;
+        state.node_vreg[value_node as usize] = true;
+        if (home as usize) < L::MAX_SLOTS as usize {
+            state.slot_vreg[home as usize] = vreg;
+            state.slot_kind[home as usize] = kind;
+            state.slot_valid[home as usize] = true;
+        }
+        src = vreg;
+    }
+    if src == 0 {
+        return Ok(());
+    }
+    body.push(MirInsn {
+        op: M_STORE_SLOT,
+        dst: 0,
+        src0: src,
+        src1: 0,
+        imm: slot as i32,
+        aux: kind as u16,
+    })
+    .ok_or(MirError::InsnCapacity)?;
+    state.vregs[idx] = src;
+    state.node_vreg[idx] = true;
+    state.slot_vreg[slot] = src;
+    state.slot_kind[slot] = kind;
+    state.slot_valid[slot] = true;
+    Ok(())
 }
 
 fn lower_const(
@@ -348,17 +422,26 @@ fn lower_const(
     let class = if is_float { VR_XMM } else { VR_GPR };
     let kind = if is_float { KIND_NUM } else { KIND_INT };
     let vreg = body.new_vreg(class, kind).ok_or(MirError::VregCapacity)?;
+    // Const nodes carry the raw 64-bit value from trace.const_values. The MIR
+    // word packs it as imm = bits 0..31, src0 = bits 32..47, src1 = bits 48..63;
+    // the old imm-as-pool-index contract broke every non-folded constant.
+    let value = trace.const_values[idx];
     let insn = MirInsn {
         op: if is_float { M_CONST_F } else { M_CONST_I },
         dst: vreg,
-        src0: 0,
-        src1: 0,
-        imm: trace.imm[idx],
-        aux: trace.aux[idx],
+        src0: ((value >> 32) & 0xFFFF) as u16,
+        src1: ((value >> 48) & 0xFFFF) as u16,
+        imm: (value & 0xFFFF_FFFF) as u32 as i32,
+        aux: 0,
     };
     body.push(insn).ok_or(MirError::InsnCapacity)?;
     state.vregs[idx] = vreg;
     state.node_vreg[idx] = true;
+    if let Some(slot) = state.slot_of(idx) {
+        state.slot_vreg[slot] = vreg;
+        state.slot_kind[slot] = if is_float { KIND_NUM } else { KIND_INT };
+        state.slot_valid[slot] = true;
+    }
     Ok(())
 }
 
@@ -374,6 +457,37 @@ fn lower_type_guard(
     } else {
         KIND_NUM
     };
+    let value_node = trace.in0[idx];
+    // If the value was computed earlier in this trace it already lives in a
+    // vreg; the guard only asserts its type. Reloading the slot's memory here
+    // would read a stale payload for slots the machine updates out-of-band.
+    if value_node != NO_OPERAND
+        && state.node_vreg[value_node as usize]
+        && state.vregs[value_node as usize] != 0
+    {
+        let vreg = state.vregs[value_node as usize];
+        body.push(MirInsn {
+            op: M_GUARD,
+            dst: 0,
+            // src0 carries the guarded slot index for the machine tag check.
+            src0: slot as u16,
+            src1: 0,
+            imm: if trace.op[idx] == OP_GUARD_INT {
+                GUARD_KIND_INT
+            } else {
+                GUARD_KIND_NUM
+            },
+            aux: idx as u16,
+        })
+        .ok_or(MirError::InsnCapacity)?;
+        record_snapshot(body, idx as u16, trace.pc[idx], state)?;
+        state.vregs[idx] = vreg;
+        state.node_vreg[idx] = true;
+        state.slot_vreg[slot] = vreg;
+        state.slot_kind[slot] = kind;
+        state.slot_valid[slot] = true;
+        return Ok(());
+    }
     if state.slot_valid[slot] && state.slot_kind[slot] == kind {
         state.vregs[idx] = state.slot_vreg[slot];
         state.node_vreg[idx] = true;
@@ -382,7 +496,8 @@ fn lower_type_guard(
     let guard = MirInsn {
         op: M_GUARD,
         dst: 0,
-        src0: 0,
+        // src0 carries the guarded slot index for the machine tag check.
+        src0: slot as u16,
         src1: 0,
         imm: if trace.op[idx] == OP_GUARD_INT {
             GUARD_KIND_INT
@@ -508,6 +623,8 @@ fn lower_int_arith(
     state: &mut LoweringState,
 ) -> Result<(), MirError> {
     let dst = body.new_vreg(VR_GPR, KIND_INT).ok_or(MirError::VregCapacity)?;
+    let a = operand_fresh(trace, trace.in0[idx], body, state)?;
+    let b = operand_fresh(trace, trace.in1[idx], body, state)?;
     body.push(MirInsn {
         op: match trace.op[idx] {
             OP_ADD_I => M_ADD_I,
@@ -515,14 +632,140 @@ fn lower_int_arith(
             _ => M_MUL_I,
         },
         dst,
-        src0: operand_vreg(trace, trace.in0[idx], state),
-        src1: operand_vreg(trace, trace.in1[idx], state),
+        src0: a,
+        src1: b,
         imm: 0,
         aux: 0,
     })
     .ok_or(MirError::InsnCapacity)?;
+    // The machine's integer arithmetic wraps; the interpreter widens to double.
+    // A overflow guard deoptimizes to the recorded pc so the interpreter
+    // re-executes the operation with dual-number semantics.
+    body.push(MirInsn {
+        op: M_GUARD,
+        dst: 0,
+        src0: 0,
+        src1: 0,
+        imm: GUARD_KIND_OFLOW,
+        aux: idx as u16,
+    })
+    .ok_or(MirError::InsnCapacity)?;
+    record_snapshot(body, idx as u16, trace.pc[idx], state)?;
     state.vregs[idx] = dst;
     state.node_vreg[idx] = true;
+    // The result also lives in the destination slot for slot-backed consumers
+    // (the next TSETI reads the slot, not the vreg).
+    if let Some(slot) = state.slot_of(idx) {
+        state.slot_vreg[slot] = dst;
+        state.slot_kind[slot] = KIND_INT;
+        state.slot_valid[slot] = true;
+    }
+    Ok(())
+}
+
+/// Lowers one math builtin call through slot memory. The machine-level call
+/// reads the argument from its slot and writes the result to the result slot;
+/// every other live slot-bound value is spilled to memory before the call and
+/// reloaded into fresh vregs afterwards, so no vreg is live in a caller-saved
+/// register across the helper call (SysV clobbers them all).
+fn lower_callm(
+    trace: &IrTrace,
+    idx: usize,
+    body: &mut MirBody,
+    state: &mut LoweringState,
+) -> Result<(), MirError> {
+    let dst_slot = trace.aux[idx] as usize;
+    let arg_node = trace.in0[idx] as usize;
+    let arg_slot = trace.aux[arg_node] as usize;
+    let fnid = trace.imm[idx];
+
+    // Freshest argument value into its slot.
+    let arg_vreg = operand_fresh(trace, trace.in0[idx], body, state)?;
+    body.push(MirInsn {
+        op: M_STORE_SLOT,
+        dst: 0,
+        src0: arg_vreg as u16,
+        src1: 0,
+        imm: arg_slot as i32,
+        aux: 0,
+    })
+    .ok_or(MirError::InsnCapacity)?;
+    state.slot_valid[arg_slot] = true;
+    state.slot_vreg[arg_slot] = arg_vreg as u16;
+
+    // Spill every other live slot-bound value to its slot.
+    let mut spilled: [(usize, u8); ssl_config::limits::MAX_SLOTS as usize] = [(0, 0); ssl_config::limits::MAX_SLOTS as usize];
+    let mut spilled_count = 0usize;
+    for slot in 0..ssl_config::limits::MAX_SLOTS as usize {
+        if slot == dst_slot || slot == arg_slot || !state.slot_valid[slot] {
+            continue;
+        }
+        let vreg = state.slot_vreg[slot];
+        if vreg == 0 {
+            continue;
+        }
+        let is_num = state.slot_kind[slot] == KIND_NUM;
+        body.push(MirInsn {
+            op: if is_num { M_STORE_SLOT_F } else { M_STORE_SLOT },
+            dst: 0,
+            src0: vreg,
+            src1: 0,
+            imm: slot as i32,
+            aux: 0,
+        })
+        .ok_or(MirError::InsnCapacity)?;
+        state.slot_valid[slot] = false;
+        spilled[spilled_count] = (slot, if is_num { 1 } else { 0 });
+        spilled_count += 1;
+    }
+
+    // The call itself: slot in, slot out.
+    body.push(MirInsn {
+        op: M_CALLM,
+        dst: 0,
+        src0: arg_slot as u16,
+        src1: 0,
+        imm: fnid,
+        aux: dst_slot as u16,
+    })
+    .ok_or(MirError::InsnCapacity)?;
+
+    // Reload the result into a fresh xmm vreg.
+    let result = body.new_vreg(VR_XMM, KIND_NUM).ok_or(MirError::VregCapacity)?;
+    body.push(MirInsn {
+        op: M_LOAD_SLOT_F,
+        dst: result,
+        src0: 0,
+        src1: 0,
+        imm: dst_slot as i32,
+        aux: 0,
+    })
+    .ok_or(MirError::InsnCapacity)?;
+    state.slot_vreg[dst_slot] = result;
+    state.slot_kind[dst_slot] = KIND_NUM;
+    state.slot_valid[dst_slot] = true;
+    state.vregs[idx] = result;
+    state.node_vreg[idx] = true;
+
+    // Reload every spilled slot into a fresh vreg of its own kind.
+    for entry in &spilled[..spilled_count] {
+        let (slot, is_num) = *entry;
+        let kind = if is_num == 1 { KIND_NUM } else { KIND_INT };
+        let class = if is_num == 1 { VR_XMM } else { VR_GPR };
+        let fresh = body.new_vreg(class, kind).ok_or(MirError::VregCapacity)?;
+        body.push(MirInsn {
+            op: if is_num == 1 { M_LOAD_SLOT_F } else { M_LOAD_SLOT },
+            dst: fresh,
+            src0: 0,
+            src1: 0,
+            imm: slot as i32,
+            aux: 0,
+        })
+        .ok_or(MirError::InsnCapacity)?;
+        state.slot_vreg[slot] = fresh;
+        state.slot_kind[slot] = kind;
+        state.slot_valid[slot] = true;
+    }
     Ok(())
 }
 
@@ -533,6 +776,8 @@ fn lower_float_arith(
     state: &mut LoweringState,
 ) -> Result<(), MirError> {
     let dst = body.new_vreg(VR_XMM, KIND_NUM).ok_or(MirError::VregCapacity)?;
+    let a = operand_fresh(trace, trace.in0[idx], body, state)?;
+    let b = operand_fresh(trace, trace.in1[idx], body, state)?;
     body.push(MirInsn {
         op: match trace.op[idx] {
             OP_ADD_F => M_ADD_F,
@@ -541,14 +786,23 @@ fn lower_float_arith(
             _ => M_DIV_F,
         },
         dst,
-        src0: operand_vreg(trace, trace.in0[idx], state),
-        src1: operand_vreg(trace, trace.in1[idx], state),
+        src0: a,
+        src1: b,
         imm: 0,
         aux: 0,
     })
     .ok_or(MirError::InsnCapacity)?;
+    // No overflow guard here: SSE arithmetic produces infinities per IEEE-754,
+    // which matches the interpreter's dual-number float path, and the x86
+    // overflow flag is never set by addsd/subsd/mulsd so a jo guard was dead.
+    record_snapshot(body, idx as u16, trace.pc[idx], state)?;
     state.vregs[idx] = dst;
     state.node_vreg[idx] = true;
+    if let Some(slot) = state.slot_of(idx) {
+        state.slot_vreg[slot] = dst;
+        state.slot_kind[slot] = KIND_NUM;
+        state.slot_valid[slot] = true;
+    }
     Ok(())
 }
 
@@ -562,8 +816,8 @@ fn lower_compare_value(
         trace.op[idx],
         OP_LT_F | OP_LE_F | OP_EQ_F | OP_NE_F
     );
-    let lhs = operand_vreg(trace, trace.in0[idx], state);
-    let rhs = operand_vreg(trace, trace.in1[idx], state);
+    let lhs = operand_fresh(trace, trace.in0[idx], body, state)?;
+    let rhs = operand_fresh(trace, trace.in1[idx], body, state)?;
     let code = compare_code(trace.op[idx]);
     body.push(MirInsn {
         op: if float { M_CMP_F } else { M_CMP_I },
@@ -729,46 +983,14 @@ fn lower_phi(
     body: &mut MirBody,
     state: &mut LoweringState,
 ) -> Result<(), MirError> {
-    let vector = trace.ty[idx] == TY_VEC;
-    let class = if vector { VR_XMM } else { VR_GPR };
-    let dst = body.new_vreg(class, KIND_NUM).ok_or(MirError::VregCapacity)?;
-    let preheader = trace.in0[idx];
-    let src = operand_vreg(trace, preheader, state);
-    if src != 0 {
-        body.push(MirInsn {
-            op: if vector { M_MOV_F } else { M_MOV_I },
-            dst,
-            src0: src,
-            src1: 0,
-            imm: 0,
-            aux: 0,
-        })
-        .ok_or(MirError::InsnCapacity)?;
+    // Phi values ride the frame slot: consumers read the slot's guard-load vreg,
+    // and finalize_phis writes the backedge value back to the slot. No register
+    // copy or entry initialization is needed here.
+    if state.phi_node_count < state.phi_nodes.len() {
+        state.phi_nodes[state.phi_node_count] = idx as u16;
+        state.phi_node_count += 1;
     }
-    let backedge = trace.in1[idx];
-    if backedge != NO_OPERAND {
-        let back_src = operand_vreg(trace, backedge, state);
-        if state.phi_copy_count < state.phi_copies.len() {
-            state.phi_copies[state.phi_copy_count] = PhiCopy {
-                phi: dst,
-                src: back_src,
-                vector,
-            };
-            state.phi_copy_count += 1;
-        }
-    }
-    state.vregs[idx] = dst;
-    state.node_vreg[idx] = true;
-    if let Some(slot) = state.slot_of(idx) {
-        if state.phi_store_count < state.phi_stores.len() {
-            state.phi_stores[state.phi_store_count] = PhiStore {
-                slot,
-                vreg: dst,
-                kind: KIND_INT,
-            };
-            state.phi_store_count += 1;
-        }
-    }
+    let _ = (trace, body, state);
     Ok(())
 }
 
@@ -779,12 +1001,70 @@ fn operand_vreg(trace: &IrTrace, node: u16, state: &LoweringState) -> u16 {
     state.vregs[node as usize]
 }
 
+/// Resolves one operand that may be slot-backed: slot-writing producers
+/// (TGETI, COPY_S, CONST, ...) leave their value in the destination slot with
+/// slot_valid cleared, so the consumer must reload it into a fresh vreg
+/// instead of reading the zero-initialized phantom vreg id.
+fn operand_fresh(
+    trace: &IrTrace,
+    node: u16,
+    body: &mut MirBody,
+    state: &mut LoweringState,
+) -> Result<u16, MirError> {
+    if node != NO_OPERAND && state.node_vreg[node as usize] {
+        return Ok(state.vregs[node as usize]);
+    }
+    if node != NO_OPERAND {
+        let slot = trace.aux[node as usize] as usize;
+        if slot < L::MAX_SLOTS as usize {
+            let is_num = state.slot_kind[slot] == KIND_NUM;
+            let class = if is_num { VR_XMM } else { VR_GPR };
+            let kind = if is_num { KIND_NUM } else { KIND_INT };
+            let fresh = body.new_vreg(class, kind).ok_or(MirError::VregCapacity)?;
+            body.push(MirInsn {
+                op: if is_num { M_LOAD_SLOT_F } else { M_LOAD_SLOT },
+                dst: fresh,
+                src0: 0,
+                src1: 0,
+                imm: slot as i32,
+                aux: 0,
+            })
+            .ok_or(MirError::InsnCapacity)?;
+            state.slot_vreg[slot] = fresh;
+            state.slot_kind[slot] = kind;
+            state.slot_valid[slot] = true;
+            return Ok(fresh);
+        }
+    }
+    Ok(0)
+}
+
 fn table_vreg(trace: &IrTrace, node: u16, state: &LoweringState) -> u16 {
     operand_vreg(trace, node, state)
 }
 
 fn index_vreg(trace: &IrTrace, node: u16, state: &LoweringState) -> u16 {
     operand_vreg(trace, node, state)
+}
+
+/// Resolves the static kind of one value node: slot-copy nodes carry it in imm,
+/// others derive it from the IR type.
+fn value_kind_of(trace: &IrTrace, node: u16) -> u8 {
+    if node != NO_OPERAND && trace.op[node as usize] == OP_COPY_S {
+        let k = trace.imm[node as usize] as u8;
+        if k != KIND_NIL {
+            return k;
+        }
+    }
+    if node != NO_OPERAND {
+        match trace.ty[node as usize] {
+            TY_NUM => KIND_NUM,
+            TY_BOOL => KIND_BOOL,
+            _ => KIND_INT,
+        }
+    } else {
+        KIND_INT
+    }
 }
 
 /// Resolves one value source as a boxed slot index or a typed vreg.

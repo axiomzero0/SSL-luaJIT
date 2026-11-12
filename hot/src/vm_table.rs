@@ -83,6 +83,14 @@ pub fn set_cell(heap: &mut [u8], obj: u32, index: u32, value: SslValue) -> Optio
     write_cell(heap, base + cell_offset(index), value)
 }
 
+/// Byte offset of the string-property pair area: immediately after the array
+/// cells, which grow with the table length. The old fixed offset
+/// (SMALL_TABLE_CELLS * CELL_BYTES) overlapped array cells 7 and 8.
+fn pairs_base(heap: &[u8], base: u32) -> Option<u32> {
+    let len = read_u32(heap, base + header::LEN)?;
+    Some(base + heap_layout::HEADER_BYTES + len * heap_layout::CELL_BYTES)
+}
+
 /// Reads a string-keyed property by linear scan over the pair area.
 pub fn get_prop(heap: &[u8], obj: u32, key: u32) -> Option<SslValue> {
     let base = object_base(heap.len() as u32, obj)?;
@@ -90,7 +98,7 @@ pub fn get_prop(heap: &[u8], obj: u32, key: u32) -> Option<SslValue> {
     if count > MAX_TABLE_PROPS {
         return None;
     }
-    let pairs = base + heap_layout::SMALL_TABLE_CELLS * heap_layout::CELL_BYTES;
+    let pairs = pairs_base(heap, base)?;
     for idx in 0..count {
         let entry = pairs + idx * (L::PROP_PAIR_BYTES);
         let stored = read_cell(heap, entry)?;
@@ -108,7 +116,7 @@ pub fn set_prop(heap: &mut [u8], obj: u32, key: u32, value: SslValue) -> Option<
     if count > MAX_TABLE_PROPS {
         return None;
     }
-    let pairs = base + heap_layout::SMALL_TABLE_CELLS * heap_layout::CELL_BYTES;
+    let pairs = pairs_base(heap, base)?;
     for idx in 0..count {
         let entry = pairs + idx * (L::PROP_PAIR_BYTES);
         let stored = read_cell(heap, entry)?;

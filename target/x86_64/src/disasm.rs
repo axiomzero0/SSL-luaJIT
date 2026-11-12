@@ -94,9 +94,11 @@ fn decode_one(bytes: &[u8], offset: usize, line: &mut Line) -> Option<usize> {
         let name = match byte1 {
             0x55 => "push r13",
             0x56 => "push r14",
+            0x57 => "push r15",
             0x54 => "push r12",
             0x5D => "pop r13",
             0x5E => "pop r14",
+            0x5F => "pop r15",
             0x5C => "pop r12",
             _ => return None,
         };
@@ -111,6 +113,40 @@ fn decode_one(bytes: &[u8], offset: usize, line: &mut Line) -> Option<usize> {
             let mut text = [0u8; 96];
             let n = render_reg2(&mut text, "mov", rm, reg);
             return finish_text(line, at + 3, &text, n);
+        }
+        // REX 8B/89 with mod=2 and SIB rm=100: heap access [r15 + idx*1 + disp32].
+        if (byte1 == 0x8B || byte1 == 0x89) && bytes.get(at + 2)? & 0xC7 == 0x84 {
+            let sib = *bytes.get(at + 3)?;
+            let disp = read_le32(bytes, at + 4)?;
+            if (sib & 0xC0) == 0x00 && (sib & 7) == 7 && ((sib >> 3) & 7) != 4 {
+                let is_load = byte1 == 0x8B;
+                let base = reg_from_reg_field(bytes[at + 2], rex);
+                let index = sib_index(sib, rex);
+                let mut text = [0u8; 96];
+                let mut n = copy_str(&mut text, 0, if is_load { "mov r" } else { "mov [r15+" });
+                if is_load {
+                    n = write_num(&mut text, n, base as u64);
+                    n = copy_str(&mut text, n, ", [r15+");
+                }
+                n = write_num(&mut text, n, index as u64);
+                n = copy_str(&mut text, n, if is_load { "+" } else { "]+r" });
+                // Store form keeps the value register in the reg field.
+                let value = if is_load { 0 } else { reg_from_reg_field(bytes[at + 2], rex) };
+                if !is_load {
+                    n = write_num(&mut text, n, value as u64);
+                }
+                n = copy_str(&mut text, n, if is_load { "+" } else { "]" });
+                let _ = n;
+                let disp_v = disp as u64;
+                let mut text2 = [0u8; 96];
+                let mut m = copy_str(&mut text2, 0, "disp=");
+                m = write_num(&mut text2, m, disp_v);
+                let mut full = [0u8; 96];
+                let mut k = copy_str(&mut full, 0, &std::str::from_utf8(&text[..n]).unwrap_or("?"));
+                k = copy_str(&mut full, k, &std::str::from_utf8(&text2[..m]).unwrap_or("?"));
+                return finish_text(line, at + 8, &full, k);
+            }
+            return None;
         }
         if byte1 == 0x8B && bytes.get(at + 2)? & 0xC7 == 0x83 {
             let dst = reg_from_reg_field(bytes[at + 2], rex);

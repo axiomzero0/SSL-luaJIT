@@ -239,8 +239,11 @@ pub fn minor_collect(
     scratch: &mut GcScratch,
 ) -> Result<(), RunError> {
     mark_all(state, heap, rt, scratch)?;
-    evacuate_region(heap, rt, scratch, 0, state.bump_ptr, false)?;
-    state.bump_ptr = 0;
+    // Eden's first object starts at one cell (handle 0 is invalid); evacuating
+    // from offset 0 would reject the first handle and skip every live object.
+    let eden_first = ssl_config::target_model::heap_layout::CELL_BYTES;
+    evacuate_region(heap, rt, scratch, eden_first, state.bump_ptr, false)?;
+    state.bump_ptr = eden_first;
     let survivor_used = rt.survivor_bump - heap::survivor_base();
     if survivor_used > L::GC_SURVIVOR_PROMOTE {
         evacuate_region(heap, rt, scratch, heap::survivor_base(), rt.survivor_bump, true)?;

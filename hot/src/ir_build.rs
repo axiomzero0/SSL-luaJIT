@@ -10,7 +10,8 @@
 
 use crate::bytecode as bc;
 use crate::ir::*;
-use crate::record::{TraceBuffer, TraceOp, OBS_INT, OBS_NUM, OBS_TBL};
+use crate::mir_build::{KIND_BOOL, KIND_INT, KIND_NIL, KIND_NUM, KIND_TBL};
+use crate::record::{TraceBuffer, TraceOp, OBS_BOOL, OBS_INT, OBS_NONE, OBS_NUM, OBS_TBL};
 use ssl_config::limits as L;
 
 /// Graphification failure enumeration.
@@ -85,6 +86,7 @@ pub struct Builder {
     trace: IrTrace,
     env: [u16; L::MAX_SLOTS as usize],
     params: [u16; L::MAX_SLOTS as usize],
+    phis: [u16; L::MAX_SLOTS as usize],
     gvn: GvnTable,
     mem_last: u16,
 }
@@ -95,9 +97,32 @@ impl Builder {
             trace: IrTrace::new(),
             env: [NO_OPERAND; L::MAX_SLOTS as usize],
             params: [NO_OPERAND; L::MAX_SLOTS as usize],
+            phis: [NO_OPERAND; L::MAX_SLOTS as usize],
             gvn: GvnTable::new(),
             mem_last: NO_OPERAND,
         }
+    }
+
+    /// Pre-creates the loop-carried phi for one slot written inside the trace.
+    /// Body reads must observe the previous iteration's final value, which is the
+    /// phi, not the trace-entry parameter; the backedge input is patched at close.
+    fn prepare_loop_carried(&mut self, slot: u8, header_pc: u32) -> Result<(), BuildError> {
+        let idx = slot as usize;
+        let param = self.param(slot)?;
+        let phi = self.push_node(
+            OP_PHI,
+            TY_ANY,
+            param,
+            param,
+            NO_OPERAND,
+            0,
+            slot as u16,
+            FLAG_SIDE_EFFECT,
+            header_pc,
+        )?;
+        self.phis[idx] = phi;
+        self.env[idx] = phi;
+        Ok(())
     }
 
     /// Returns the node for one slot, creating its pre-header parameter on first read.
@@ -151,14 +176,17 @@ impl Builder {
         Ok(node)
     }
 
-    /// Emits a type guard for one value node with the observed type.
-    fn guard_value(&mut self, value: u16, obs: u8, slot: u8) -> Result<u16, BuildError> {
+    /// Emits a type guard for one value node with the observed type. The
+    /// guard's recorded pc is the CONSUMING operation's pc: a guard exit must
+    /// resume there, not at bytecode zero (which would re-run the whole
+    /// program prologue on every deopt).
+    fn guard_value(&mut self, value: u16, obs: u8, slot: u8, pc: u32) -> Result<u16, BuildError> {
         let (op, ty) = match obs {
             OBS_INT => (OP_GUARD_INT, TY_INT),
             OBS_NUM => (OP_GUARD_NUM, TY_NUM),
             _ => return Ok(value),
         };
-        let guard = self.push_node(op, ty, value, NO_OPERAND, NO_OPERAND, 0, slot as u16, FLAG_SIDE_EFFECT, 0)?;
+        let guard = self.push_node(op, ty, value, NO_OPERAND, NO_OPERAND, 0, slot as u16, FLAG_SIDE_EFFECT, pc)?;
         self.push_pure(guard)
     }
 
@@ -185,12 +213,53 @@ impl Builder {
     }
 }
 
+/// Reports whether one recorded opcode writes its `a` field as a frame slot.
+fn op_writes_slot(op: u8) -> bool {
+    matches!(
+        op,
+        bc::OP_LOADK
+            | bc::OP_MOVE
+            | bc::OP_ADDI
+            | bc::OP_ADD
+            | bc::OP_SUB
+            | bc::OP_MUL
+            | bc::OP_DIV
+            | bc::OP_LT
+            | bc::OP_LE
+            | bc::OP_EQ
+            | bc::OP_GT
+            | bc::OP_GE
+            | bc::OP_NE
+            | bc::OP_TNEW
+            | bc::OP_TGETI
+            | bc::OP_TGETK
+            | bc::OP_GGET
+            | bc::OP_CALLM
+    )
+}
+
 /// Converts one recorded iteration into the SoA IR with incremental GVN.
-pub fn build_trace(buffer: &TraceBuffer) -> Result<BuildOutput, BuildError> {
+/// The program's constant pool resolves LOADK values so const nodes carry raw
+/// values (never pool indices) downstream; ADDI immediates join the same rule.
+pub fn build_trace(buffer: &TraceBuffer, consts: &[bc::Const]) -> Result<BuildOutput, BuildError> {
     let mut builder = Builder::new();
+    // Pre-pass: every slot written inside the loop is loop-carried; its body reads
+    // must bind to a header phi, not to the trace-entry parameter.
+    let mut written = [false; L::MAX_SLOTS as usize];
     for idx in 0..buffer.count as usize {
         let op = &buffer.ops[idx];
-        lower_op(&mut builder, op)?;
+        if op_writes_slot(op.bc_op) {
+            written[op.a as usize] = true;
+        }
+    }
+    for slot in 0..L::MAX_SLOTS as usize {
+        if written[slot] {
+            builder.prepare_loop_carried(slot as u8, buffer.header_pc)?;
+        }
+    }
+    for idx in 0..buffer.count as usize {
+        let op = &buffer.ops[idx];
+        lower_op(&mut builder, op, idx, buffer, consts)?;
     }
     close_backedge(&mut builder, buffer)?;
     Ok(BuildOutput {
@@ -201,18 +270,48 @@ pub fn build_trace(buffer: &TraceBuffer) -> Result<BuildOutput, BuildError> {
 }
 
 /// Lowers one recorded bytecode operation into IR nodes.
-fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
+fn lower_op(
+    builder: &mut Builder,
+    op: &TraceOp,
+    op_idx: usize,
+    buffer: &TraceBuffer,
+    consts: &[bc::Const],
+) -> Result<(), BuildError> {
+    let _ = buffer;
     match op.bc_op {
-        bc::OP_LOADK => lower_loadk(builder, op),
+        bc::OP_LOADK => lower_loadk(builder, op, consts),
         bc::OP_MOVE => {
             let value = builder.param(op.b)?;
-            builder.env[op.a as usize] = value;
+            // Materialize the copy as a side-effecting slot store so the machine
+            // keeps the destination slot's memory in sync with the interpreter;
+            // later slot loads (guards) and deopt reads depend on that memory.
+            // The recorded result type gives the store its static tag.
+            let kind = match op.res_ty {
+                OBS_INT => KIND_INT,
+                OBS_NUM => KIND_NUM,
+                OBS_BOOL => KIND_BOOL,
+                OBS_TBL => KIND_TBL,
+                _ => KIND_NIL,
+            };
+            let node = builder.push_node(
+                OP_COPY_S,
+                TY_ANY,
+                value,
+                NO_OPERAND,
+                NO_OPERAND,
+                kind as i32,
+                op.a as u16,
+                FLAG_SIDE_EFFECT,
+                op.pc,
+            )?;
+            builder.env[op.a as usize] = node;
             Ok(())
         }
         bc::OP_ADDI => {
             let lhs = builder.param(op.b)?;
-            let guarded = builder.guard_value(lhs, op.lhs_ty, op.b)?;
+            let guarded = builder.guard_value(lhs, op.lhs_ty, op.b, op.pc)?;
             let k = builder.push_node(OP_CONST_I, TY_INT, NO_OPERAND, NO_OPERAND, NO_OPERAND, op.imm, 0, 0, op.pc)?;
+            builder.trace.const_values[k as usize] = op.imm as i64 as u64;
             let k = builder.push_pure(k)?;
             let sum = builder.push_node(OP_ADD_I, TY_INT, guarded, k, NO_OPERAND, 0, op.a as u16, 0, op.pc)?;
             builder.env[op.a as usize] = builder.push_pure(sum)?;
@@ -230,6 +329,22 @@ fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
             } else {
                 !op.taken
             };
+            // A guard exit must resume at the operation that PRODUCED the
+            // condition slot, not at the branch itself: the machine exits
+            // before recomputing the bool, so resuming at the branch would
+            // read a stale value and ping-pong on the same guard forever.
+            // Loop-carried condition slots (no in-trace producer) are already
+            // machine-fresh at the branch, so the branch pc stays correct.
+            let mut resume_pc = op.pc;
+            let mut scan = op_idx;
+            while scan > 0 {
+                scan -= 1;
+                let earlier = &buffer.ops[scan];
+                if op_writes_slot(earlier.bc_op) && earlier.a == op.a {
+                    resume_pc = earlier.pc;
+                    break;
+                }
+            }
             let _ = builder.push_node(
                 OP_GUARD_BOOL,
                 TY_BOOL,
@@ -239,7 +354,7 @@ fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
                 expected as i32,
                 op.a as u16,
                 FLAG_SIDE_EFFECT,
-                op.pc,
+                resume_pc,
             )?;
             Ok(())
         }
@@ -253,8 +368,15 @@ fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
             let table = builder.param(op.b)?;
             let table = builder.guard_shape(table, op.b)?;
             let idx_val = builder.param(op.c)?;
-            let idx_val = builder.guard_value(idx_val, op.rhs_ty, op.c)?;
-            let load = builder.push_node(OP_TGETI, TY_ANY, table, idx_val, NO_OPERAND, 0, op.a as u16, FLAG_MEMORY, op.pc)?;
+            let idx_val = builder.guard_value(idx_val, op.rhs_ty, op.c, op.pc)?;
+            // Carry the observed element type so the MIR layer reloads the
+            // value with the right register class.
+            let load_ty = match op.res_ty {
+                crate::record::OBS_NUM => TY_NUM,
+                crate::record::OBS_INT => TY_INT,
+                _ => TY_ANY,
+            };
+            let load = builder.push_node(OP_TGETI, load_ty, table, idx_val, NO_OPERAND, 0, op.a as u16, FLAG_MEMORY, op.pc)?;
             builder.memory_node(load);
             builder.env[op.a as usize] = load;
             Ok(())
@@ -263,7 +385,7 @@ fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
             let table = builder.param(op.b)?;
             let table = builder.guard_shape(table, op.b)?;
             let idx_val = builder.param(op.c)?;
-            let idx_val = builder.guard_value(idx_val, op.rhs_ty, op.c)?;
+            let idx_val = builder.guard_value(idx_val, op.rhs_ty, op.c, op.pc)?;
             let val = builder.param(op.a)?;
             let store = builder.push_node(OP_TSETI, TY_ANY, table, idx_val, val, 0, 0, FLAG_MEMORY | FLAG_SIDE_EFFECT, op.pc)?;
             builder.memory_node(store);
@@ -285,8 +407,10 @@ fn lower_op(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
         }
         bc::OP_CALLM => {
             let arg = builder.param(op.c)?;
-            let arg = builder.guard_value(arg, op.lhs_ty, op.c)?;
-            let call = builder.push_node(OP_CALLM, result_ty(op), arg, NO_OPERAND, NO_OPERAND, op.imm as i32, op.a as u16, 0, op.pc)?;
+            let arg = builder.guard_value(arg, op.lhs_ty, op.c, op.pc)?;
+            // The CALLM function id rides field b (CALLM has no immediate word,
+            // so TraceOp.imm is always zero here).
+            let call = builder.push_node(OP_CALLM, result_ty(op), arg, NO_OPERAND, NO_OPERAND, op.b as i32, op.a as u16, 0, op.pc)?;
             builder.env[op.a as usize] = builder.push_pure(call)?;
             Ok(())
         }
@@ -303,19 +427,28 @@ fn result_ty(op: &TraceOp) -> u8 {
     }
 }
 
-fn lower_loadk(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
+fn lower_loadk(builder: &mut Builder, op: &TraceOp, consts: &[bc::Const]) -> Result<(), BuildError> {
     let const_index = op.b as u32 | (op.c as u32) << 8;
+    let (op_code, ty, value) = match consts.get(const_index as usize) {
+        Some(bc::Const::Int(v)) => (OP_CONST_I, TY_INT, *v as i64 as u64),
+        // Full 64-bit float bit pattern; imm alone cannot hold it.
+        Some(bc::Const::Num(v)) => (OP_CONST_F, TY_NUM, v.to_bits()),
+        // Strings are not numeric values; the trace keeps a placeholder int
+        // (string consts only matter as TGETK/TSETK keys, lowered elsewhere).
+        _ => (OP_CONST_I, TY_INT, 0),
+    };
     let node = builder.push_node(
-        OP_CONST_I,
-        TY_ANY,
+        op_code,
+        ty,
         NO_OPERAND,
         NO_OPERAND,
         NO_OPERAND,
-        const_index as i32,
+        0,
         op.a as u16,
         0,
         op.pc,
     )?;
+    builder.trace.const_values[node as usize] = value;
     builder.env[op.a as usize] = builder.push_pure(node)?;
     Ok(())
 }
@@ -331,8 +464,8 @@ fn as_float(builder: &mut Builder, node: u16, obs: u8) -> Result<u16, BuildError
 fn lower_arith(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
     let lhs = builder.param(op.b)?;
     let rhs = builder.param(op.c)?;
-    let lhs_g = builder.guard_value(lhs, op.lhs_ty, op.b)?;
-    let rhs_g = builder.guard_value(rhs, op.rhs_ty, op.c)?;
+    let lhs_g = builder.guard_value(lhs, op.lhs_ty, op.b, op.pc)?;
+    let rhs_g = builder.guard_value(rhs, op.rhs_ty, op.c, op.pc)?;
     let float_op = op.bc_op == bc::OP_DIV || op.lhs_ty == OBS_NUM || op.rhs_ty == OBS_NUM;
     if float_op {
         let l = as_float(builder, lhs_g, op.lhs_ty)?;
@@ -360,8 +493,8 @@ fn lower_arith(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
 fn lower_compare(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> {
     let lhs = builder.param(op.b)?;
     let rhs = builder.param(op.c)?;
-    let lhs_g = builder.guard_value(lhs, op.lhs_ty, op.b)?;
-    let rhs_g = builder.guard_value(rhs, op.rhs_ty, op.c)?;
+    let lhs_g = builder.guard_value(lhs, op.lhs_ty, op.b, op.pc)?;
+    let rhs_g = builder.guard_value(rhs, op.rhs_ty, op.c, op.pc)?;
     let float = op.lhs_ty == OBS_NUM || op.rhs_ty == OBS_NUM;
     let (l, r) = if float {
         (
@@ -390,26 +523,52 @@ fn lower_compare(builder: &mut Builder, op: &TraceOp) -> Result<(), BuildError> 
     Ok(())
 }
 
-/// Creates phi nodes for loop-carried slots and finalizes the builder.
+/// Resolves one end-of-iteration value through phi chains to a non-phi node.
+/// At the loop bottom every header phi evaluates to its backedge input, so a
+/// backedge edge targeting a phi can legally target that phi's backedge input.
+/// Walking the chain also removes phi-to-phi dependences from the machine-level
+/// sequential phi-copy sequence, which would otherwise corrupt register values.
+fn resolve_backedge_value(builder: &Builder, start: u16, start_slot: usize) -> u16 {
+    let mut node = start;
+    let mut hops = 0usize;
+    while node != NO_OPERAND
+        && builder.trace.op[node as usize] == OP_PHI
+        && node != builder.phis[start_slot]
+        && hops < L::MAX_SLOTS as usize
+    {
+        node = builder.trace.in1[node as usize];
+        hops += 1;
+    }
+    if node != NO_OPERAND && builder.trace.op[node as usize] == OP_PHI {
+        // The chain looped back to the start phi: the slot carries its own
+        // entry value around the loop.
+        return builder.params[start_slot];
+    }
+    if node == NO_OPERAND {
+        return builder.params[start_slot];
+    }
+    node
+}
+
+/// Patches the pre-created loop-carried phis with the end-of-iteration values.
 fn close_backedge(builder: &mut Builder, buffer: &TraceBuffer) -> Result<(), BuildError> {
     let _ = buffer;
     for slot in 0..L::MAX_SLOTS as usize {
-        let current = builder.env[slot];
-        let param = builder.params[slot];
-        if param != NO_OPERAND && current != param && current != NO_OPERAND {
-            let phi = builder.push_node(
-                OP_PHI,
-                TY_ANY,
-                param,
-                current,
-                NO_OPERAND,
-                0,
-                slot as u16,
-                FLAG_SIDE_EFFECT,
-                buffer.header_pc,
-            )?;
-            builder.env[slot] = phi;
+        let phi = builder.phis[slot];
+        if phi == NO_OPERAND {
+            continue;
         }
+        let mut current = builder.env[slot];
+        if current == phi || current == NO_OPERAND {
+            // No write updated the slot after the phi was created (or the write
+            // deduplicated to the phi itself); the backedge carries the parameter.
+            current = builder.params[slot];
+        }
+        let current = resolve_backedge_value(builder, current, slot);
+        let placeholder = builder.trace.in1[phi as usize];
+        drop_use(&mut builder.trace, placeholder);
+        builder.trace.in1[phi as usize] = current;
+        add_use(&mut builder.trace, current);
     }
     Ok(())
 }

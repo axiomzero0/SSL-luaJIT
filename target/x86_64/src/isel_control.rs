@@ -46,10 +46,22 @@ fn lower_compare(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
 }
 
 fn lower_type_guard(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
+    if mir.imm == ssl_hot::mir::GUARD_KIND_OFLOW {
+        // jo <stub>: the machine's integer arithmetic wrapped; the snapshot stub
+        // restores the operand slots and the interpreter re-executes the op.
+        let mut branch = MachineInsn::new(X_JCC_REL);
+        branch.imm = CC_O as i32;
+        branch.aux = stub_label(mir.aux);
+        return machine.push(branch);
+    }
+    // mir.src0 carries the guarded slot index; the tag lives in the slot's
+    // first payload word inside VmState. Checking a constant slot (the old
+    // behavior passed the guard KIND as the slot) silently validated the
+    // wrong slot and let mistyped values reach specialized arithmetic.
     let scratch = machine.scratch_gpr();
     let mut load = MachineInsn::new(X_MOV_SLOT_R);
     load.dst = scratch;
-    load.imm = slot_tag_disp(mir.imm);
+    load.imm = slot_tag_disp(mir.src0 as i32);
     if !machine.push(load) {
         return false;
     }
@@ -151,23 +163,25 @@ pub const fn invert(cc: u8) -> u8 {
 }
 
 fn lower_callm(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
-    if mir.src0 != mir.dst && mir.src0 != 0 {
-        let mut move_arg = MachineInsn::new(X_MOVSD_X2X);
-        move_arg.dst = mir.dst;
-        move_arg.src0 = mir.src0;
-        if !machine.push(move_arg) {
-            return false;
-        }
+    // Slot-mediated math call: read [state + arg payload] into xmm0, call the
+    // helper (SysV: xmm0 in, xmm0 out), write xmm0 to [state + result payload].
+    // No vreg crosses the call, so the helper clobbering caller-saved
+    // registers cannot corrupt any live value.
+    let mut load = MachineInsn::new(X_MOVSD_STATE_M2X);
+    load.dst = PHYS_BASE;
+    load.imm = slot_payload_disp(mir.src0 as i32);
+    if !machine.push(load) {
+        return false;
     }
     let mut call = MachineInsn::new(X_CALL_REL);
     call.aux = helper_label(mir.imm as u16);
     if !machine.push(call) {
         return false;
     }
-    let mut result = MachineInsn::new(X_MOVSD_X2X);
-    result.dst = mir.dst;
-    result.src0 = PHYS_BASE;
-    machine.push(result)
+    let mut store = MachineInsn::new(X_MOVSD_STATE_X2M);
+    store.src0 = PHYS_BASE;
+    store.imm = slot_payload_disp(mir.aux as i32);
+    machine.push(store)
 }
 
 fn lower_exit(mir: &MirInsn, machine: &mut MachineFunction) -> bool {

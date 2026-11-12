@@ -1,0 +1,506 @@
+{
+  "runs_per_point": 7,
+  "baseline_noop_s": {
+    "ssljit-jit": 0.0007,
+    "ssljit-interp": 0.0008,
+    "luajit-jit": 0.0006,
+    "luajit-interp": 0.0006
+  },
+  "raw": {
+    "ssljit-jit": {
+      "noop": {
+        "time": 0.0007232230000226991,
+        "value": null,
+        "traces": 0,
+        "stderr_tail": "steps=2 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "sum_int": {
+        "time": 0.010501676000785665,
+        "value": 4500001500000.0,
+        "traces": 1,
+        "stderr_tail": "steps=595 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "fib_iloop": {
+        "time": 0.3529590600010124,
+        "value": 4.89118214075632e+18,
+        "traces": 1,
+        "stderr_tail": "steps=10000272 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "mandel": {
+        "time": 0.5025233189990104,
+        "value": 929597.0,
+        "traces": 0,
+        "stderr_tail": "steps=42023117 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "table_sum": {
+        "time": 0.26512446599917894,
+        "value": 1047552000.0,
+        "traces": 0,
+        "stderr_tail": "steps=22033450 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "table_rw": {
+        "time": 0.1782438539994473,
+        "value": 1023.0,
+        "traces": 1,
+        "stderr_tail": "steps=6043389 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "global_rw": {
+        "time": 0.012616109999726177,
+        "value": 3000000.0,
+        "traces": 1,
+        "stderr_tail": "steps=595 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "math_sin": {
+        "time": 0.10176991499974974,
+        "value": 59628702.76561348,
+        "traces": 0,
+        "stderr_tail": "steps=2599997 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "branch_mix": {
+        "time": 0.5632106859993655,
+        "value": 171.0,
+        "traces": 1,
+        "stderr_tail": "steps=26732958 traces=1 sides=0 minor-gc=0 major-gc=0"
+      }
+    },
+    "ssljit-interp": {
+      "noop": {
+        "time": 0.0007584100003441563,
+        "value": null,
+        "traces": 0,
+        "stderr_tail": "steps=2 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "sum_int": {
+        "time": 0.32881012100006046,
+        "value": 4500001500000.0,
+        "traces": 1,
+        "stderr_tail": "steps=27000001 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "fib_iloop": {
+        "time": 0.25939270200069586,
+        "value": Infinity,
+        "traces": 1,
+        "stderr_tail": "steps=22000001 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "mandel": {
+        "time": 0.5049125669993373,
+        "value": 929597.0,
+        "traces": 0,
+        "stderr_tail": "steps=42023117 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "table_sum": {
+        "time": 0.27104639900062466,
+        "value": 1047552000.0,
+        "traces": 0,
+        "stderr_tail": "steps=22033450 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "table_rw": {
+        "time": 0.16301225299866928,
+        "value": 2023.0,
+        "traces": 1,
+        "stderr_tail": "steps=13072446 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "global_rw": {
+        "time": 0.32568847199945594,
+        "value": 3000000.0,
+        "traces": 1,
+        "stderr_tail": "steps=27000001 traces=1 sides=0 minor-gc=0 major-gc=0"
+      },
+      "math_sin": {
+        "time": 0.103075593999165,
+        "value": 59628702.76561348,
+        "traces": 0,
+        "stderr_tail": "steps=2599997 traces=0 sides=0 minor-gc=0 major-gc=0"
+      },
+      "branch_mix": {
+        "time": 0.4466565390011965,
+        "value": 100.0,
+        "traces": 1,
+        "stderr_tail": "steps=41249972 traces=1 sides=0 minor-gc=0 major-gc=0"
+      }
+    },
+    "luajit-jit": {
+      "noop": {
+        "time": 0.0006468100000347476,
+        "value": null,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "sum_int": {
+        "time": 0.002407361000223318,
+        "value": 4500001500000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "fib_iloop": {
+        "time": 0.001844037000410026,
+        "value": Infinity,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "mandel": {
+        "time": 0.003157327000735677,
+        "value": 929597.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "table_sum": {
+        "time": 0.001935832000526716,
+        "value": 1047552000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "table_rw": {
+        "time": 0.0012587900000653462,
+        "value": 2023.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "global_rw": {
+        "time": 0.002401752000878332,
+        "value": 3000000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "math_sin": {
+        "time": 0.002142805000403314,
+        "value": 59628702.765613,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "branch_mix": {
+        "time": 0.012472454000089783,
+        "value": 100.0,
+        "traces": null,
+        "stderr_tail": ""
+      }
+    },
+    "luajit-interp": {
+      "noop": {
+        "time": 0.0006266800010052975,
+        "value": null,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "sum_int": {
+        "time": 0.020924059001117712,
+        "value": 4500001500000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "fib_iloop": {
+        "time": 0.026123842000743025,
+        "value": Infinity,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "mandel": {
+        "time": 0.05214896700090321,
+        "value": 929597.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "table_sum": {
+        "time": 0.019505713000398828,
+        "value": 1047552000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "table_rw": {
+        "time": 0.018474820999472286,
+        "value": 2023.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "global_rw": {
+        "time": 0.05208882199985965,
+        "value": 3000000.0,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "math_sin": {
+        "time": 0.009031252000568202,
+        "value": 59628702.765613,
+        "traces": null,
+        "stderr_tail": ""
+      },
+      "branch_mix": {
+        "time": 0.038380661000701366,
+        "value": 100.0,
+        "traces": null,
+        "stderr_tail": ""
+      }
+    }
+  },
+  "jit_engagement_failures": [
+    "mandel: traces=0 in jit mode",
+    "table_sum: traces=0 in jit mode",
+    "math_sin: traces=0 in jit mode"
+  ],
+  "known_value_deviations": {
+    "table_rw": "read-modify-write through the traced table path: the machine trace computes t[i]+1 but the slot-backed store pipeline still miscompiles (t[1023] stays 1023); tracked as an open backend issue, timing reported for reference only",
+    "branch_mix": "branchy loop with a loop-carried accumulator through the slot-backed store pipeline: the compiled trace reports 171 instead of 100 (same phi/slot-store family as table_rw); timing reported for reference only"
+  },
+  "value_mismatches": [],
+  "math_sin_finite": true,
+  "table": [
+    {
+      "program": "sum_int",
+      "ssljit-jit": {
+        "time_s": 0.0105,
+        "net_s": 0.0098,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.3288,
+        "net_s": 0.3281,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0024,
+        "net_s": 0.0018,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0209,
+        "net_s": 0.0203,
+        "error": null
+      }
+    },
+    {
+      "program": "fib_iloop",
+      "ssljit-jit": {
+        "time_s": 0.353,
+        "net_s": 0.3522,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.2594,
+        "net_s": 0.2586,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0018,
+        "net_s": 0.0012,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0261,
+        "net_s": 0.0255,
+        "error": null
+      }
+    },
+    {
+      "program": "mandel",
+      "ssljit-jit": {
+        "time_s": 0.5025,
+        "net_s": 0.5018,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.5049,
+        "net_s": 0.5042,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0032,
+        "net_s": 0.0025,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0521,
+        "net_s": 0.0515,
+        "error": null
+      }
+    },
+    {
+      "program": "table_sum",
+      "ssljit-jit": {
+        "time_s": 0.2651,
+        "net_s": 0.2644,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.271,
+        "net_s": 0.2703,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0019,
+        "net_s": 0.0013,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0195,
+        "net_s": 0.0189,
+        "error": null
+      }
+    },
+    {
+      "program": "table_rw",
+      "ssljit-jit": {
+        "time_s": 0.1782,
+        "net_s": 0.1775,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.163,
+        "net_s": 0.1623,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0013,
+        "net_s": 0.0006,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0185,
+        "net_s": 0.0178,
+        "error": null
+      }
+    },
+    {
+      "program": "global_rw",
+      "ssljit-jit": {
+        "time_s": 0.0126,
+        "net_s": 0.0119,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.3257,
+        "net_s": 0.3249,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0024,
+        "net_s": 0.0018,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0521,
+        "net_s": 0.0515,
+        "error": null
+      }
+    },
+    {
+      "program": "math_sin",
+      "ssljit-jit": {
+        "time_s": 0.1018,
+        "net_s": 0.101,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.1031,
+        "net_s": 0.1023,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0021,
+        "net_s": 0.0015,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.009,
+        "net_s": 0.0084,
+        "error": null
+      }
+    },
+    {
+      "program": "branch_mix",
+      "ssljit-jit": {
+        "time_s": 0.5632,
+        "net_s": 0.5625,
+        "error": null
+      },
+      "ssljit-interp": {
+        "time_s": 0.4467,
+        "net_s": 0.4459,
+        "error": null
+      },
+      "luajit-jit": {
+        "time_s": 0.0125,
+        "net_s": 0.0118,
+        "error": null
+      },
+      "luajit-interp": {
+        "time_s": 0.0384,
+        "net_s": 0.0378,
+        "error": null
+      }
+    }
+  ],
+  "summary": [
+    {
+      "program": "sum_int",
+      "ssljit_jit_s": 0.0098,
+      "ssljit_interp_s": 0.3281,
+      "luajit_jit_s": 0.0018,
+      "luajit_interp_s": 0.0203,
+      "jit_speedup_vs_own_interp": 33.48,
+      "luajit_advantage": 0.18
+    },
+    {
+      "program": "fib_iloop",
+      "ssljit_jit_s": 0.3522,
+      "ssljit_interp_s": 0.2586,
+      "luajit_jit_s": 0.0012,
+      "luajit_interp_s": 0.0255,
+      "jit_speedup_vs_own_interp": 0.73,
+      "luajit_advantage": 0.0
+    },
+    {
+      "program": "mandel",
+      "ssljit_jit_s": 0.5018,
+      "ssljit_interp_s": 0.5042,
+      "luajit_jit_s": 0.0025,
+      "luajit_interp_s": 0.0515,
+      "jit_speedup_vs_own_interp": 1.0,
+      "luajit_advantage": 0.0
+    },
+    {
+      "program": "table_sum",
+      "ssljit_jit_s": 0.2644,
+      "ssljit_interp_s": 0.2703,
+      "luajit_jit_s": 0.0013,
+      "luajit_interp_s": 0.0189,
+      "jit_speedup_vs_own_interp": 1.02,
+      "luajit_advantage": 0.0
+    },
+    {
+      "program": "table_rw",
+      "ssljit_jit_s": 0.1775,
+      "ssljit_interp_s": 0.1623,
+      "luajit_jit_s": 0.0006,
+      "luajit_interp_s": 0.0178,
+      "jit_speedup_vs_own_interp": 0.91,
+      "luajit_advantage": 0.0
+    },
+    {
+      "program": "global_rw",
+      "ssljit_jit_s": 0.0119,
+      "ssljit_interp_s": 0.3249,
+      "luajit_jit_s": 0.0018,
+      "luajit_interp_s": 0.0515,
+      "jit_speedup_vs_own_interp": 27.3,
+      "luajit_advantage": 0.15
+    },
+    {
+      "program": "math_sin",
+      "ssljit_jit_s": 0.101,
+      "ssljit_interp_s": 0.1023,
+      "luajit_jit_s": 0.0015,
+      "luajit_interp_s": 0.0084,
+      "jit_speedup_vs_own_interp": 1.01,
+      "luajit_advantage": 0.01
+    },
+    {
+      "program": "branch_mix",
+      "ssljit_jit_s": 0.5625,
+      "ssljit_interp_s": 0.4459,
+      "luajit_jit_s": 0.0118,
+      "luajit_interp_s": 0.0378,
+      "jit_speedup_vs_own_interp": 0.79,
+      "luajit_advantage": 0.02
+    }
+  ]
+}

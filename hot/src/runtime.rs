@@ -58,9 +58,12 @@ impl GcState {
 
 /// Installed trace header bookkeeping used by the interpreter to enter machine code.
 pub struct TraceBookkeeping {
-    /// Word indices of installed loop headers.
+    /// Word indices of installed (or blacklisted) loop headers.
     pub headers: [u32; L::MAX_TRACES as usize],
-    /// Installed trace count.
+    /// Parallel to headers: set when compilation failed for that header, so
+    /// hot detection stops retrying it every interpreter iteration.
+    pub uncompilable: [bool; L::MAX_TRACES as usize],
+    /// Installed trace count (installed plus blacklisted headers).
     pub count: u32,
 }
 
@@ -68,14 +71,46 @@ impl TraceBookkeeping {
     pub const fn new() -> TraceBookkeeping {
         TraceBookkeeping {
             headers: [0; L::MAX_TRACES as usize],
+            uncompilable: [false; L::MAX_TRACES as usize],
             count: 0,
         }
+    }
+
+    /// Marks a header as uncompilable: the compile pipeline rejected it, so
+    /// hot detection must stop retrying every iteration (the interpreter is
+    /// the correct fallback; per-iteration compile attempts inflate wall time
+    /// manyfold without ever producing machine code).
+    pub fn mark_uncompilable(&mut self, header_pc: u32) -> bool {
+        for idx in 0..self.count as usize {
+            if self.headers[idx] == header_pc {
+                self.uncompilable[idx] = true;
+                return true;
+            }
+        }
+        if self.count >= L::MAX_TRACES {
+            return false;
+        }
+        self.headers[self.count as usize] = header_pc;
+        self.uncompilable[self.count as usize] = true;
+        self.count += 1;
+        true
+    }
+
+    /// Reports whether a header previously failed compilation.
+    pub fn is_uncompilable(&self, header_pc: u32) -> bool {
+        for idx in 0..self.count as usize {
+            if self.headers[idx] == header_pc {
+                return self.uncompilable[idx];
+            }
+        }
+        false
     }
 
     /// Records one installed header when capacity allows.
     pub fn install(&mut self, header_pc: u32) -> bool {
         for idx in 0..self.count as usize {
             if self.headers[idx] == header_pc {
+                self.uncompilable[idx] = false;
                 return true;
             }
         }
@@ -114,6 +149,9 @@ pub struct Runtime {
     pub gc: GcState,
     /// Installed trace headers.
     pub traces: TraceBookkeeping,
+    /// Total interpreter steps executed across the whole run (machine-code
+    /// iterations are not counted; the per-call budget in run_until_event is).
+    pub executed_steps: u64,
 }
 
 impl Runtime {
@@ -126,6 +164,7 @@ impl Runtime {
             old_bump: crate::heap::old_base(),
             gc: GcState::new(),
             traces: TraceBookkeeping::new(),
+            executed_steps: 0,
         }
     }
 

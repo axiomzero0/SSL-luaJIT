@@ -78,6 +78,10 @@ pub fn allocate(machine: &MachineFunction, mir: &ssl_hot::mir::MirBody) -> Resul
         for entry in &mir.snap_entries[start..stop] {
             let vreg = entry.vreg;
             if (vreg as usize) < machine.vreg_count as usize {
+                // The stub executes immediately after the guard's branch fires, so
+                // the register still holds the vreg at that point; extending the
+                // interval to the guard position is sufficient. Extending further
+                // would exhaust the zero-spill pool for wide traces.
                 if !live[vreg as usize] {
                     live[vreg as usize] = true;
                     intervals[vreg as usize] = (vreg, guard_insn as u32, guard_insn as u32);

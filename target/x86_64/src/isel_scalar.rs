@@ -22,14 +22,39 @@ use ssl_hot::mir::MirInsn;
 pub fn lower_scalar(mir: &MirInsn, machine: &mut MachineFunction) -> bool {
     match mir.op {
         ssl_hot::mir::M_CONST_I => {
-            let mut insn = MachineInsn::new(X_MOV_IR);
+            // mir carries the raw value (imm = bits 0..31, src0/src1 = high
+            // halves); X_MOV_IR64 emits it as a full 64-bit movabs. The value is
+            // sign-extended here so the packed form round-trips negatives.
+            let value = (mir.imm as i64) as u64;
+            let mut insn = MachineInsn::new(X_MOV_IR64);
             insn.dst = mir.dst;
-            insn.imm = mir.imm;
+            insn.imm = (value & 0xFFFF_FFFF) as u32 as i32;
+            insn.src0 = ((value >> 32) & 0xFFFF) as u16;
+            insn.src1 = ((value >> 48) & 0xFFFF) as u16;
             let ok = machine.push(insn);
             if ok {
                 machine.note_const(mir.dst, mir.imm);
             }
             ok
+        }
+        ssl_hot::mir::M_CONST_F => {
+            // Materialize the 64-bit double bit pattern through a scratch GPR
+            // and a movq into the destination xmm register.
+            let bits_lo = mir.imm;
+            let bits_mid = mir.src0;
+            let bits_hi = mir.src1;
+            let mut load = MachineInsn::new(X_MOV_IR64);
+            load.dst = machine.scratch_gpr();
+            load.imm = bits_lo;
+            load.src0 = bits_mid;
+            load.src1 = bits_hi;
+            if !machine.push(load) {
+                return false;
+            }
+            let mut move_to_xmm = MachineInsn::new(X_MOVD_G2X);
+            move_to_xmm.dst = mir.dst;
+            move_to_xmm.src0 = machine.scratch_gpr();
+            machine.push(move_to_xmm)
         }
         ssl_hot::mir::M_MOV_I => {
             let mut insn = MachineInsn::new(X_MOV_RR);

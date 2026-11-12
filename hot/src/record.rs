@@ -3,10 +3,10 @@
 // CEP:WHY: design.md Part 2 requires decoupled recording; the buffer is linear by construction so graphification stays a single pass.
 // CEP:CLASS: HPC-0
 // CEP:STATUS: complete
-// CEP:FAILURE: Returns RecordError on capacity exhaustion, execution errors, or boundary operations that cannot be traced; partial traces are discarded by the caller.
-// CEP:ASSUMES: recording executes real program effects exactly once; the iteration executed during recording counts as program execution, so the interpreter resumes after the backedge.
+// CEP:FAILURE: Returns RecordError on capacity exhaustion, execution errors, boundary operations that cannot be traced, or traces that never return to their own header; partial traces are discarded by the caller.
+// CEP:ASSUMES: recording executes real program effects exactly once; the iteration executed during recording counts as program execution, so the interpreter resumes after the backedge; a trace closes only when execution lands back on its own header, so nested-loop backedges are recorded as ordinary path markers and never close a foreign trace.
 // CEP:COST: one step engine dispatch plus one buffer append per instruction; no allocation.
-// CEP:EVIDENCE: unit tests ssl-tests::unit_record; differential tests.
+// CEP:EVIDENCE: unit tests ssl-tests::unit_record; differential tests; nested-loop regression (the recorder previously closed inner-loop traces on the outer backedge, producing machine traces without progress).
 
 use crate::bytecode as bc;
 use crate::interp_step::{self, RunError};
@@ -169,14 +169,18 @@ pub fn record_iteration(
             taken: false,
             is_backedge: false,
         };
-        if bc::is_jump(record.op) && state.pc < pc_before {
+        if bc::uses_condition_slot(record.op) {
+            op.taken = state.pc != pc_before + 2;
+        }
+        // A trace closes only when execution lands back on its OWN header.
+        // Closing on any backward jump (the old rule) let a nested loop's
+        // backedge close a foreign trace: the compiled machine code then
+        // looped without executing the real body and never terminated.
+        if bc::is_jump(record.op) && state.pc == header_pc {
             op.is_backedge = true;
             append(&mut buffer, op)?;
             buffer.exit_pc = pc_before;
             return Ok(buffer);
-        }
-        if bc::uses_condition_slot(record.op) {
-            op.taken = state.pc != pc_before + 2;
         }
         append(&mut buffer, op)?;
     }

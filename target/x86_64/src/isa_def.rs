@@ -65,6 +65,10 @@ pub const X_CMP_IR: u16 = 49;
 pub const X_ADDPD: u16 = 50;
 pub const X_SUBPD: u16 = 51;
 pub const X_MULPD: u16 = 52;
+/// Loads a double from [state + disp32] into an xmm register.
+pub const X_MOVSD_STATE_M2X: u16 = 53;
+/// Stores an xmm register into [state + disp32].
+pub const X_MOVSD_STATE_X2M: u16 = 54;
 
 /// Condition code low nibble: jump less (signed).
 pub const CC_LT_I: u8 = 0xC;
@@ -78,6 +82,9 @@ pub const CC_GT_I: u8 = 0xF;
 pub const CC_EQ: u8 = 0x4;
 /// Condition code low nibble: jump not equal.
 pub const CC_NE: u8 = 0x5;
+/// Overflow condition; the low nibble for the 0F 8x two-byte jump family
+/// (0F 80 = jo rel32).
+pub const CC_O: u8 = 0x0;
 /// Condition code low nibble: jump below (ucomisd CF1 ZF0).
 pub const CC_LT_F: u8 = 0x2;
 /// Condition code low nibble: jump below or equal (ucomisd CF1 or ZF1).

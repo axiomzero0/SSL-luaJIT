@@ -76,6 +76,9 @@ pub const OP_VSPLAT_F: u16 = 36;
 pub const OP_NE_I: u16 = 37;
 /// Double not-equal compare.
 pub const OP_NE_F: u16 = 38;
+/// Frame-slot copy: writes the value node into the aux slot's memory cell so
+/// later slot loads observe the interpreter's per-iteration state.
+pub const OP_COPY_S: u16 = 39;
 
 // Type tags.
 /// Any dynamic value.
@@ -123,6 +126,11 @@ pub struct IrTrace {
     pub flags: [u16; L::MAX_IR_NODES as usize],
     /// Source bytecode word index per node (for snapshots and remarks).
     pub pc: [u32; L::MAX_IR_NODES as usize],
+    /// Full 64-bit constant value per const node (OP_CONST_I / OP_CONST_F).
+    /// The i32 imm field cannot hold f64 bit patterns or wide i64 values, so
+    /// the builder stores the resolved value here and the MIR carries it split
+    /// across imm/src0/src1.
+    pub const_values: [u64; L::MAX_IR_NODES as usize],
     /// Live node count.
     pub count: u16,
 }
@@ -142,6 +150,7 @@ impl IrTrace {
             cost: [0; L::MAX_IR_NODES as usize],
             flags: [0; L::MAX_IR_NODES as usize],
             pc: [0; L::MAX_IR_NODES as usize],
+            const_values: [0; L::MAX_IR_NODES as usize],
             count: 0,
         }
     }
